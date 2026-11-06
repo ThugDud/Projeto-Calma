@@ -81,6 +81,18 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
    - Horário de término opcional usando intervalo: `14:30-16:00` ou `14h-16h`.
    - Eventos também aparecem no calendário mensal e no painel do dia selecionado.
 
+10. **Configurações Persistentes**:
+   - Tela dedicada (`6`) com seções **Geral**, **Notificações** e **Aparência**.
+   - Alternância de opções booleanas e edição de intervalos numéricos com validação.
+   - Salvamento imediato em `~/.config/calma/config.toml` (ou `$XDG_CONFIG_HOME/calma/config.toml`).
+   - Padrões conservadores: daemon, início automático e todas as categorias de notificação começam desativados.
+   - Valores inválidos são normalizados com segurança; arquivos malformados nunca são sobrescritos automaticamente.
+
+11. **Fundação do Daemon Independente**:
+   - Separação entre o ciclo de vida da TUI e um processo de daemon que compartilha o mesmo SQLite.
+   - Estrutura modular com serviço, agendador periódico e abstração de notificações.
+   - Execução manual em primeiro plano com `calma daemon`; integração com systemd, IPC e notificações desktop ficam para fases futuras.
+
 ---
 
 ## ⌨️ Atalhos de Teclado
@@ -92,6 +104,7 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
 | `3` ou `p` | Alternar para visualização de **Hierarquia de Projetos** |
 | `4` ou `v` | Alternar para visualização de **Visão Geral (Dashboard)** |
 | `5` | Alternar para a **Agenda de Eventos** |
+| `6` | Alternar para a tela de **Configurações** |
 | `n` | Abrir **Cadastro Rápido** de nova tarefa (ou novo evento na Agenda) |
 | `E` | Abrir **Cadastro Rápido de Evento** |
 | `e` | Editar tarefa, projeto ou evento selecionado |
@@ -105,6 +118,8 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
 | `?` | Abrir tela de ajuda com todos os atalhos |
 | `Esc` | Fechar modal / Cancelar / Voltar |
 | `q` | Sair do aplicativo |
+
+Na tela de Configurações: `↑`/`↓` ou `j`/`k` navegam, `Enter`/`Espaço` alternam opções booleanas ou iniciam a edição de valores numéricos, `Esc` retorna à tela anterior e `q` encerra o Calma.
 
 ---
 
@@ -123,6 +138,14 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
 ```bash
 cargo run
 ```
+
+### Executar o daemon em primeiro plano:
+
+```bash
+cargo run -- daemon
+```
+
+O daemon só executa verificações quando o **monitoramento em segundo plano** está ativado na tela de Configurações. Ele é um processo separado da TUI e compartilha o mesmo banco SQLite.
 
 ### Executar a suíte de testes automatizados:
 
@@ -151,10 +174,17 @@ cp target/release/calma ~/.local/bin/
 
 ## 📂 Onde os Dados são Armazenados
 
-O Calma armazena o banco SQLite seguindo os padrões XDG:
+O Calma separa dados e configuração seguindo os padrões XDG:
 
+**Dados (SQLite):**
 - **Padrão**: `~/.local/share/calma/calma.db`
 - Se `$XDG_DATA_HOME` estiver definida: `$XDG_DATA_HOME/calma/calma.db`
+
+**Configuração (TOML):**
+- **Padrão**: `~/.config/calma/config.toml`
+- Se `$XDG_CONFIG_HOME` estiver definida: `$XDG_CONFIG_HOME/calma/config.toml`
+
+O arquivo de configuração é criado automaticamente com valores padrão na primeira execução. A TUI e o daemon leem exatamente o mesmo arquivo.
 
 ### Backup e Restauração:
 
@@ -179,9 +209,14 @@ calma/
 └── src/
     ├── main.rs         # Ponto de entrada, inicialização do terminal e loop principal
     ├── app.rs          # Estado da aplicação, modos de entrada e lógica de tela
-    ├── config.rs       # Resolução de diretórios XDG e configurações
+    ├── config.rs       # Configuração TOML persistente e resolução de diretórios XDG
     ├── errors.rs       # Tratamento robusto de erros (AppError & AppResult)
     ├── input.rs        # Mapeamento e processamento de eventos do Crossterm
+    ├── daemon/         # Daemon independente da TUI
+    │   ├── mod.rs
+    │   ├── service.rs       # Ciclo de vida do daemon
+    │   ├── scheduler.rs     # Verificações periódicas de prazos e eventos
+    │   └── notifications.rs # Abstração de notificações (sem entrega desktop ainda)
     ├── models/         # Entidades de domínio (Task, Project, Event)
     │   ├── mod.rs
     │   ├── task.rs
@@ -204,6 +239,7 @@ calma/
         ├── hierarchy.rs
         ├── overview.rs
         ├── events.rs
+        ├── settings.rs
         └── modal.rs
 ```
 
@@ -292,6 +328,18 @@ Help you organize your academic, personal, and financial life without requiring 
    - Optional end time using a time range: `14:30-16:00` or `14h-16h`.
    - Events also appear in the monthly calendar and in the selected day's side panel.
 
+10. **Persistent Settings**:
+   - Dedicated screen (`6`) with **General**, **Notifications**, and **Appearance** sections.
+   - Boolean toggles and validated numeric intervals.
+   - Changes are saved immediately to `~/.config/calma/config.toml` (or `$XDG_CONFIG_HOME/calma/config.toml`).
+   - Conservative defaults: daemon, automatic startup, and all notification categories are disabled.
+   - Invalid values are safely normalized; malformed files are never overwritten automatically.
+
+11. **Independent Daemon Foundation**:
+   - TUI lifecycle is separate from a daemon process that shares the same SQLite database.
+   - Modular service, periodic scheduler, and notification abstraction.
+   - Manual foreground execution with `calma daemon`; systemd integration, IPC, and desktop delivery are future work.
+
 ---
 
 ## ⌨️ Keyboard Shortcuts
@@ -317,6 +365,8 @@ Help you organize your academic, personal, and financial life without requiring 
 | `Esc` | Close modal / Cancel / Go back |
 | `q` | Quit the application |
 
+In the Settings screen: `↑`/`↓` or `j`/`k` navigate, `Enter`/`Space` toggle booleans or start editing numeric values, `Esc` returns to the previous view, and `q` quits Calma.
+
 ---
 
 ## 🛠 System Requirements
@@ -334,6 +384,14 @@ Help you organize your academic, personal, and financial life without requiring 
 ```bash
 cargo run
 ```
+
+### Run the daemon in the foreground:
+
+```bash
+cargo run -- daemon
+```
+
+The daemon only performs checks when **background monitoring** is enabled in the Settings screen. It is a separate process from the TUI and shares the same SQLite database.
 
 ### Run the automated test suite:
 
@@ -363,10 +421,17 @@ cp target/release/calma ~/.local/bin/
 
 ## 📂 Data Storage Location
 
-Calma stores its SQLite database following the XDG Base Directory Specification:
+Calma separates data and configuration following the XDG Base Directory Specification:
 
+**Data (SQLite):**
 - **Default**: `~/.local/share/calma/calma.db`
 - If `$XDG_DATA_HOME` is set: `$XDG_DATA_HOME/calma/calma.db`
+
+**Configuration (TOML):**
+- **Default**: `~/.config/calma/config.toml`
+- If `$XDG_CONFIG_HOME` is set: `$XDG_CONFIG_HOME/calma/config.toml`
+
+The configuration file is created automatically with conservative defaults on first run. The TUI and daemon read the same file.
 
 ### Backup and Restore
 
@@ -393,9 +458,14 @@ calma/
 └── src/
     ├── main.rs         # Entry point, terminal initialization, and main loop
     ├── app.rs          # Application state, input modes, and screen logic
-    ├── config.rs       # XDG directory resolution and configuration
+    ├── config.rs       # Persistent TOML configuration and XDG resolution
     ├── errors.rs       # Robust error handling (AppError & AppResult)
     ├── input.rs        # Crossterm event mapping and processing
+    ├── daemon/         # TUI-independent daemon foundation
+    │   ├── mod.rs
+    │   ├── service.rs       # Daemon lifecycle
+    │   ├── scheduler.rs     # Periodic deadline/event checks
+    │   └── notifications.rs # Notification abstraction (no desktop delivery yet)
     ├── models/         # Domain entities (Task, Project, Event)
     │   ├── mod.rs
     │   ├── task.rs
@@ -418,5 +488,6 @@ calma/
         ├── hierarchy.rs
         ├── overview.rs
         ├── events.rs
+        ├── settings.rs
         └── modal.rs
 ```

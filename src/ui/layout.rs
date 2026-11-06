@@ -5,6 +5,7 @@ use crate::ui::header;
 use crate::ui::hierarchy;
 use crate::ui::modal;
 use crate::ui::overview;
+use crate::ui::settings;
 use crate::ui::shortcuts;
 use crate::ui::tasks;
 use crate::ui::theme::Theme;
@@ -43,6 +44,9 @@ pub fn render(f: &mut Frame, app: &App) {
         }
         View::Eventos => {
             events::render(f, chunks[1], theme, app);
+        }
+        View::Configuracoes => {
+            settings::render(f, chunks[1], theme, app);
         }
     }
 

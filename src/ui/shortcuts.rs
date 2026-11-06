@@ -39,19 +39,22 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
         }
         InputMode::Normal => match app.current_view {
             View::Calendario => {
-                "[1] Mês [2] Tarefas [3] Hierarquia [4] Visão Geral [5] Eventos | [n] Nova | [E] Evento | [j/k] Selecionar | [t] Hoje | [PgUp/PgDn] Mês | [?] Ajuda | [q] Sair"
+                "[1] Mês [2] Tarefas [3] Hierarquia [4] Visão Geral [5] Eventos [6] Configurações | [n] Nova | [E] Evento | [j/k] Selecionar | [t] Hoje | [PgUp/PgDn] Mês | [?] Ajuda | [q] Sair"
             }
             View::Tarefas => {
-                "[1] Mês [2] Tarefas [3] Hierarquia [4] Visão Geral [5] Eventos | [n] Nova | [E] Evento | [e] Editar | [Espaço] Concluir | [d] Excluir | [?] Ajuda | [q] Sair"
+                "[1] Mês [2] Tarefas [3] Hierarquia [4] Visão Geral [5] Eventos [6] Configurações | [n] Nova | [E] Evento | [e] Editar | [Espaço] Concluir | [d] Excluir | [?] Ajuda | [q] Sair"
             }
             View::Hierarquia => {
-                "[Enter] Exp/Rec | [s] Subtarefa | [p] Projeto | [e] Editar | [Espaço] Concluir | [d] Excluir | [E] Evento | [?] Ajuda | [q] Sair"
+                "[Enter] Exp/Rec | [s] Subtarefa | [p] Projeto | [e] Editar | [Espaço] Concluir | [d] Excluir | [E] Evento | [6] Configurações | [?] Ajuda | [q] Sair"
             }
             View::VisaoGeral => {
-                "[↑↓/jk] Selecionar | [E] Evento | [e] Editar | [Espaço] Concluir | [d] Excluir | [5] Eventos | [?] Ajuda | [q] Sair"
+                "[↑↓/jk] Selecionar | [E] Evento | [e] Editar | [Espaço] Concluir | [d] Excluir | [5] Eventos [6] Configurações | [?] Ajuda | [q] Sair"
             }
             View::Eventos => {
-                "[n/E] Novo evento | [e] Editar | [d] Excluir | [↑↓/jk] Navegar | [1-4] Outras telas | [?] Ajuda | [q] Sair"
+                "[n/E] Novo evento | [e] Editar | [d] Excluir | [↑↓/jk] Navegar | [1-4/6] Outras telas | [?] Ajuda | [q] Sair"
+            }
+            View::Configuracoes => {
+                "[↑↓/jk] Navegar | [Enter/Espaço] Alternar ou editar | [1-5] Outras telas | [Esc] Voltar | [?] Ajuda | [q] Sair"
             }
         },
     };

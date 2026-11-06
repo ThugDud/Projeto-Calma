@@ -306,6 +306,11 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
         }
     }
 
+    // 7. Tela de configurações: navegação, alternância e edição numérica.
+    if app.current_view == View::Configuracoes {
+        return handle_settings_key(app, key);
+    }
+
     // Atalhos globais no MODO NORMAL
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -338,6 +343,10 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
         }
         KeyCode::Char('5') => {
             app.current_view = View::Eventos;
+            return Ok(true);
+        }
+        KeyCode::Char('6') => {
+            app.open_settings();
             return Ok(true);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -383,7 +392,65 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
         View::Hierarquia => handle_hierarchy_key(app, key),
         View::VisaoGeral => handle_overview_key(app, key),
         View::Eventos => handle_eventos_key(app, key),
+        View::Configuracoes => handle_settings_key(app, key),
     }
+}
+
+fn handle_settings_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
+    // Edição numérica tem prioridade sobre os atalhos da tela.
+    if app.settings.editing_value.is_some() {
+        match key.code {
+            KeyCode::Enter => app.settings_commit_edit(),
+            KeyCode::Esc => app.settings_cancel_edit(),
+            KeyCode::Backspace => app.settings_pop_char(),
+            KeyCode::Char(c) => app.settings_push_char(c),
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Char('Q') => {
+            app.quit();
+            return Ok(false);
+        }
+        KeyCode::Char('?') | KeyCode::Char('/') => {
+            app.show_help = true;
+        }
+        KeyCode::Esc => {
+            app.close_settings();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_select_previous();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_select_next();
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.settings_activate_selected();
+        }
+        KeyCode::Char('1') => {
+            app.current_view = View::Calendario;
+        }
+        KeyCode::Char('2') => {
+            app.current_view = View::Tarefas;
+        }
+        KeyCode::Char('3') => {
+            app.current_view = View::Hierarquia;
+        }
+        KeyCode::Char('4') => {
+            app.current_view = View::VisaoGeral;
+        }
+        KeyCode::Char('5') => {
+            app.current_view = View::Eventos;
+        }
+        KeyCode::Char('6') => {
+            app.open_settings();
+        }
+        _ => {}
+    }
+
+    Ok(true)
 }
 
 fn handle_tasks_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {

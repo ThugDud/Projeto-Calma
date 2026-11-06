@@ -59,6 +59,7 @@ pub fn render(
         crate::app::View::Hierarquia => "[3: Hierarquia]",
         crate::app::View::VisaoGeral => "[4: Visão Geral]",
         crate::app::View::Eventos => "[5: Eventos]",
+        crate::app::View::Configuracoes => "[6: Configurações]",
     };
 
     let date_line = format!(

@@ -1,3 +1,7 @@
+use crate::config::{
+    Config, MAX_NOTIFICATION_ADVANCE_MINUTES, MAX_POLL_INTERVAL_SECS,
+    MIN_NOTIFICATION_ADVANCE_MINUTES, MIN_POLL_INTERVAL_SECS,
+};
 use crate::errors::AppResult;
 use crate::models::event::Event;
 use crate::models::project::Project;
@@ -98,6 +102,227 @@ pub enum View {
     Hierarquia,
     VisaoGeral,
     Eventos,
+    Configuracoes,
+}
+
+/// Seções exibidas na tela de configurações.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    General,
+    Notifications,
+    Appearance,
+}
+
+impl SettingsSection {
+    pub fn title(self) -> &'static str {
+        match self {
+            SettingsSection::General => "GERAL",
+            SettingsSection::Notifications => "NOTIFICAÇÕES",
+            SettingsSection::Appearance => "APARÊNCIA",
+        }
+    }
+}
+
+/// Identificadores das configurações editáveis.
+///
+/// A lista centraliza a ordem de navegação, a seção e a forma de leitura e
+/// escrita de cada opção. Novas configurações podem ser adicionadas aqui sem
+/// reescrever a tela inteira.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingId {
+    StartWithSystem,
+    BackgroundMonitoring,
+    PollInterval,
+    NotificationsEnabled,
+    UpcomingTasks,
+    OverdueTasks,
+    UpcomingEvents,
+    NotificationAdvance,
+}
+
+impl SettingId {
+    pub const ALL: [SettingId; 8] = [
+        SettingId::StartWithSystem,
+        SettingId::BackgroundMonitoring,
+        SettingId::PollInterval,
+        SettingId::NotificationsEnabled,
+        SettingId::UpcomingTasks,
+        SettingId::OverdueTasks,
+        SettingId::UpcomingEvents,
+        SettingId::NotificationAdvance,
+    ];
+
+    pub fn section(self) -> SettingsSection {
+        match self {
+            SettingId::StartWithSystem
+            | SettingId::BackgroundMonitoring
+            | SettingId::PollInterval => SettingsSection::General,
+            SettingId::NotificationsEnabled
+            | SettingId::UpcomingTasks
+            | SettingId::OverdueTasks
+            | SettingId::UpcomingEvents
+            | SettingId::NotificationAdvance => SettingsSection::Notifications,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingId::StartWithSystem => "Iniciar com o sistema",
+            SettingId::BackgroundMonitoring => "Monitoramento em segundo plano",
+            SettingId::PollInterval => "Intervalo de verificação",
+            SettingId::NotificationsEnabled => "Notificações da área de trabalho",
+            SettingId::UpcomingTasks => "Avisar sobre prazos próximos",
+            SettingId::OverdueTasks => "Avisar sobre tarefas atrasadas",
+            SettingId::UpcomingEvents => "Avisar sobre eventos próximos",
+            SettingId::NotificationAdvance => "Antecedência das notificações",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            SettingId::StartWithSystem => {
+                "A preferência é salva, mas a integração automática com o sistema ainda não está disponível."
+            }
+            SettingId::BackgroundMonitoring => {
+                "Permite que o daemon verifique prazos e eventos periodicamente."
+            }
+            SettingId::PollInterval => "Intervalo entre verificações do daemon.",
+            SettingId::NotificationsEnabled => {
+                "Requer monitoramento em segundo plano e daemon ativo; a entrega desktop será implementada futuramente."
+            }
+            SettingId::UpcomingTasks => "Requer notificações habilitadas.",
+            SettingId::OverdueTasks => "Requer notificações habilitadas.",
+            SettingId::UpcomingEvents => "Requer notificações habilitadas.",
+            SettingId::NotificationAdvance => "Tempo de antecedência usado para prazos e eventos.",
+        }
+    }
+
+    pub fn is_numeric(self) -> bool {
+        matches!(
+            self,
+            SettingId::PollInterval | SettingId::NotificationAdvance
+        )
+    }
+
+    pub fn value(self, config: &Config) -> String {
+        match self {
+            SettingId::StartWithSystem => bool_label(config.general.start_with_system),
+            SettingId::BackgroundMonitoring => bool_label(config.general.background_monitoring),
+            SettingId::PollInterval => {
+                format!("{} segundos", config.general.poll_interval_secs)
+            }
+            SettingId::NotificationsEnabled => bool_label(config.notifications.enabled),
+            SettingId::UpcomingTasks => bool_label(config.notifications.upcoming_tasks),
+            SettingId::OverdueTasks => bool_label(config.notifications.overdue_tasks),
+            SettingId::UpcomingEvents => bool_label(config.notifications.upcoming_events),
+            SettingId::NotificationAdvance => {
+                format!("{} minutos", config.notifications.advance_minutes)
+            }
+        }
+    }
+
+    pub fn bool_value(self, config: &Config) -> Option<bool> {
+        match self {
+            SettingId::StartWithSystem => Some(config.general.start_with_system),
+            SettingId::BackgroundMonitoring => Some(config.general.background_monitoring),
+            SettingId::NotificationsEnabled => Some(config.notifications.enabled),
+            SettingId::UpcomingTasks => Some(config.notifications.upcoming_tasks),
+            SettingId::OverdueTasks => Some(config.notifications.overdue_tasks),
+            SettingId::UpcomingEvents => Some(config.notifications.upcoming_events),
+            SettingId::PollInterval | SettingId::NotificationAdvance => None,
+        }
+    }
+
+    pub fn toggle(self, config: &mut Config) {
+        match self {
+            SettingId::StartWithSystem => {
+                config.general.start_with_system = !config.general.start_with_system;
+            }
+            SettingId::BackgroundMonitoring => {
+                config.general.background_monitoring = !config.general.background_monitoring;
+            }
+            SettingId::NotificationsEnabled => {
+                config.notifications.enabled = !config.notifications.enabled;
+            }
+            SettingId::UpcomingTasks => {
+                config.notifications.upcoming_tasks = !config.notifications.upcoming_tasks;
+            }
+            SettingId::OverdueTasks => {
+                config.notifications.overdue_tasks = !config.notifications.overdue_tasks;
+            }
+            SettingId::UpcomingEvents => {
+                config.notifications.upcoming_events = !config.notifications.upcoming_events;
+            }
+            SettingId::PollInterval | SettingId::NotificationAdvance => {}
+        }
+    }
+
+    pub fn numeric_value(self, config: &Config) -> Option<u64> {
+        match self {
+            SettingId::PollInterval => Some(config.general.poll_interval_secs),
+            SettingId::NotificationAdvance => Some(config.notifications.advance_minutes as u64),
+            _ => None,
+        }
+    }
+
+    pub fn numeric_bounds(self) -> Option<(u64, u64)> {
+        match self {
+            SettingId::PollInterval => Some((MIN_POLL_INTERVAL_SECS, MAX_POLL_INTERVAL_SECS)),
+            SettingId::NotificationAdvance => Some((
+                MIN_NOTIFICATION_ADVANCE_MINUTES as u64,
+                MAX_NOTIFICATION_ADVANCE_MINUTES as u64,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Aplica um valor numérico após validar os limites.
+    ///
+    /// Retorna uma mensagem amigável quando o valor está fora da faixa.
+    pub fn set_numeric(self, config: &mut Config, value: u64) -> Result<(), String> {
+        let Some((min, max)) = self.numeric_bounds() else {
+            return Err("Esta configuração não é numérica.".to_string());
+        };
+
+        if value < min || value > max {
+            return Err(format!("Valor inválido: use entre {} e {}.", min, max));
+        }
+
+        match self {
+            SettingId::PollInterval => config.general.poll_interval_secs = value,
+            SettingId::NotificationAdvance => config.notifications.advance_minutes = value as u32,
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn bool_label(value: bool) -> String {
+    if value {
+        "Ativado".to_string()
+    } else {
+        "Desativado".to_string()
+    }
+}
+
+/// Estado de navegação e edição da tela de configurações.
+#[derive(Debug, Clone)]
+pub struct SettingsState {
+    pub selected: usize,
+    pub editing_value: Option<String>,
+    pub feedback: Option<String>,
+    pub return_view: View,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            editing_value: None,
+            feedback: None,
+            return_view: View::Calendario,
+        }
+    }
 }
 
 /// Listas de tarefas exibidas no dashboard, na mesma ordem da interface.
@@ -150,11 +375,20 @@ pub struct App {
     pub calendar_month: u32,
     /// Dia selecionado no calendário.
     pub selected_day: Option<NaiveDate>,
+    /// Configuração centralizada carregada do disco.
+    pub config: Config,
+    /// Estado de navegação/edição da tela de configurações.
+    pub settings: SettingsState,
 }
 
 impl App {
     /// Cria uma nova instância da aplicação obtendo a data do sistema operacional.
     pub fn new() -> Self {
+        Self::with_config(Config::default())
+    }
+
+    /// Cria a aplicação usando uma configuração já carregada.
+    pub fn with_config(config: Config) -> Self {
         let today = chrono::Local::now().date_naive();
         Self {
             today,
@@ -176,6 +410,8 @@ impl App {
             calendar_year: today.year(),
             calendar_month: today.month(),
             selected_day: Some(today),
+            config,
+            settings: SettingsState::default(),
         }
     }
 
@@ -343,7 +579,7 @@ impl App {
             },
             View::Calendario => self.selected_calendar_task(),
             View::VisaoGeral => self.selected_overview_task(),
-            View::Eventos => None,
+            View::Eventos | View::Configuracoes => None,
         }
     }
 
@@ -578,6 +814,7 @@ impl App {
                     };
                 }
             }
+            View::Configuracoes => {}
         }
     }
 
@@ -657,6 +894,7 @@ impl App {
                     self.input_mode = InputMode::EditTask(state);
                 }
             }
+            View::Configuracoes => {}
         }
     }
 
@@ -947,6 +1185,7 @@ impl App {
                     self.selected_index -= 1;
                 }
             }
+            View::Configuracoes => {}
         }
     }
 
@@ -974,6 +1213,7 @@ impl App {
                 let max = self.tasks.len().saturating_sub(1);
                 self.selected_index = (self.selected_index + 1).min(max);
             }
+            View::Configuracoes => {}
         }
     }
 
@@ -1005,6 +1245,139 @@ impl App {
     pub fn select_day(&mut self, day: NaiveDate) {
         self.selected_day = Some(day);
         self.calendar_selected_task_idx = 0;
+    }
+
+    // ==========================================
+    // CONFIGURAÇÕES PERSISTENTES
+    // ==========================================
+
+    /// Abre a tela de configurações guardando a visualização anterior.
+    pub fn open_settings(&mut self) {
+        if self.current_view != View::Configuracoes {
+            self.settings.return_view = self.current_view;
+            self.current_view = View::Configuracoes;
+            self.settings.feedback = None;
+            self.settings.editing_value = None;
+        }
+    }
+
+    /// Retorna à visualização anterior sem descartar configurações salvas.
+    pub fn close_settings(&mut self) {
+        self.settings.editing_value = None;
+        self.settings.feedback = None;
+        self.current_view = self.settings.return_view;
+    }
+
+    /// Configuração atualmente selecionada.
+    pub fn selected_setting(&self) -> SettingId {
+        let max = SettingId::ALL.len().saturating_sub(1);
+        SettingId::ALL[self.settings.selected.min(max)]
+    }
+
+    /// Move a seleção para a configuração anterior.
+    pub fn settings_select_previous(&mut self) {
+        if self.settings.selected > 0 {
+            self.settings.selected -= 1;
+            self.settings.feedback = None;
+        }
+    }
+
+    /// Move a seleção para a próxima configuração.
+    pub fn settings_select_next(&mut self) {
+        let max = SettingId::ALL.len().saturating_sub(1);
+        if self.settings.selected < max {
+            self.settings.selected += 1;
+            self.settings.feedback = None;
+        }
+    }
+
+    /// Ativa a configuração selecionada.
+    ///
+    /// Booleanos são alternados e salvos imediatamente. Valores numéricos
+    /// entram em modo de edição.
+    pub fn settings_activate_selected(&mut self) {
+        self.settings.feedback = None;
+        let setting = self.selected_setting();
+
+        if setting.is_numeric() {
+            if let Some(value) = setting.numeric_value(&self.config) {
+                self.settings.editing_value = Some(value.to_string());
+            }
+            return;
+        }
+
+        setting.toggle(&mut self.config);
+        self.persist_settings();
+    }
+
+    /// Cancela a edição de um valor numérico.
+    pub fn settings_cancel_edit(&mut self) {
+        self.settings.editing_value = None;
+        self.settings.feedback = None;
+    }
+
+    /// Confirma a edição do valor numérico selecionado.
+    ///
+    /// Em caso de erro, a edição permanece aberta para correção e o motivo é
+    /// exibido como feedback na tela.
+    pub fn settings_commit_edit(&mut self) {
+        let Some(buffer) = self.settings.editing_value.clone() else {
+            return;
+        };
+
+        let setting = self.selected_setting();
+        let parsed = buffer.trim().parse::<u64>();
+        let result = match parsed {
+            Ok(value) => setting.set_numeric(&mut self.config, value),
+            Err(_) => Err("Digite um número inteiro válido.".to_string()),
+        };
+
+        match result {
+            Ok(()) => {
+                self.settings.editing_value = None;
+                self.persist_settings();
+            }
+            Err(message) => {
+                self.settings.feedback = Some(message);
+            }
+        }
+    }
+
+    /// Acrescenta um caractere à edição numérica atual.
+    pub fn settings_push_char(&mut self, c: char) {
+        if let Some(buffer) = self.settings.editing_value.as_mut() {
+            if c.is_ascii_digit() {
+                buffer.push(c);
+                self.settings.feedback = None;
+            }
+        }
+    }
+
+    /// Remove o último caractere da edição numérica atual.
+    pub fn settings_pop_char(&mut self) {
+        if let Some(buffer) = self.settings.editing_value.as_mut() {
+            buffer.pop();
+            self.settings.feedback = None;
+        }
+    }
+
+    /// Persiste a configuração e produz feedback para o usuário.
+    ///
+    /// Falhas de escrita não encerram a aplicação: o erro é mostrado na
+    /// própria tela de configurações.
+    fn persist_settings(&mut self) {
+        match self.config.save() {
+            Ok(()) => {
+                self.config.load_warning = None;
+                self.settings.feedback = Some(format!(
+                    "Configurações salvas em {}",
+                    self.config.config_path.display()
+                ));
+            }
+            Err(err) => {
+                self.settings.feedback = Some(format!("Não foi possível salvar: {}", err));
+            }
+        }
     }
 
     /// Encerra a aplicação.
@@ -1167,5 +1540,87 @@ mod tests {
         app.selected_day = Some(today);
         app.calendar_selected_task_idx = 0;
         assert_eq!(app.selected_task().map(|t| t.id), Some(2));
+    }
+
+    #[test]
+    fn test_settings_toggle_persists_immediately() {
+        let path = temp_config_path("app-toggle");
+        let config = Config {
+            config_path: path.clone(),
+            ..Config::default()
+        };
+        let mut app = App::with_config(config);
+
+        app.open_settings();
+        assert_eq!(app.current_view, View::Configuracoes);
+        assert_eq!(app.selected_setting(), SettingId::StartWithSystem);
+
+        app.settings_activate_selected();
+        assert!(app.config.general.start_with_system);
+        assert!(app.settings.feedback.is_some());
+
+        let reloaded = Config::load_from(&path);
+        assert!(reloaded.general.start_with_system);
+
+        app.close_settings();
+        assert_eq!(app.current_view, View::Calendario);
+
+        cleanup_config(&path);
+    }
+
+    #[test]
+    fn test_numeric_setting_validates_and_persists() {
+        let path = temp_config_path("app-numeric");
+        let config = Config {
+            config_path: path.clone(),
+            ..Config::default()
+        };
+        let mut app = App::with_config(config);
+
+        app.settings.selected = 2; // PollInterval
+        assert_eq!(app.selected_setting(), SettingId::PollInterval);
+        app.settings_activate_selected();
+        assert_eq!(
+            app.settings.editing_value,
+            Some(crate::config::DEFAULT_POLL_INTERVAL_SECS.to_string())
+        );
+
+        // Valor inválido mantém a edição aberta e informa o usuário.
+        app.settings.editing_value = Some("0".to_string());
+        app.settings_commit_edit();
+        assert!(app.settings.editing_value.is_some());
+        assert!(app.settings.feedback.is_some());
+
+        // Valor válido é aplicado e salvo.
+        app.settings.editing_value = Some("120".to_string());
+        app.settings_commit_edit();
+        assert!(app.settings.editing_value.is_none());
+        assert_eq!(app.config.general.poll_interval_secs, 120);
+
+        let reloaded = Config::load_from(&path);
+        assert_eq!(reloaded.general.poll_interval_secs, 120);
+
+        cleanup_config(&path);
+    }
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("relógio do sistema")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "calma-app-test-{}-{}-{}",
+                std::process::id(),
+                nanos,
+                name
+            ))
+            .join(crate::config::CONFIG_FILE_NAME)
+    }
+
+    fn cleanup_config(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }

@@ -11,6 +11,8 @@ pub enum AppError {
     Business(String),
     /// Erro de serialização/desserialização.
     Serialization(String),
+    /// Erro ao carregar, validar ou salvar configurações.
+    Config(String),
     /// Operação não implementada ainda.
     NotImplemented(String),
 }
@@ -23,6 +25,7 @@ impl std::fmt::Display for AppError {
             AppError::Input(msg) => write!(f, "Entrada inválida: {}", msg),
             AppError::Business(msg) => write!(f, "Erro de regra de negócio: {}", msg),
             AppError::Serialization(msg) => write!(f, "Erro de serialização: {}", msg),
+            AppError::Config(msg) => write!(f, "Erro de configuração: {}", msg),
             AppError::NotImplemented(msg) => write!(f, "Não implementado: {}", msg),
         }
     }

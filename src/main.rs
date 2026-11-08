@@ -13,6 +13,7 @@ mod app;
 mod config;
 mod daemon;
 mod db;
+mod desktop;
 mod errors;
 mod input;
 mod models;
@@ -74,8 +75,9 @@ fn run_tui() -> AppResult<()> {
 /// Executa o daemon em primeiro plano.
 ///
 /// O processo é independente da TUI e compartilha o mesmo banco SQLite e a
-/// mesma configuração. Nesta fase não há integração com systemd, IPC ou
-/// entrega real de notificações desktop.
+/// mesma configuração. Notificações desktop, quando habilitadas, são
+/// entregues pelo backend selecionado em tempo de execução. Não há
+/// integração com systemd nem IPC.
 fn run_daemon() -> AppResult<()> {
     let config = Config::load();
 

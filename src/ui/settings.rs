@@ -1,4 +1,5 @@
 use crate::app::{App, SettingId, SettingsSection};
+use crate::desktop::notifications::{DesktopDiagnostics, ServiceAvailability};
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -13,7 +14,9 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
         .borders(Borders::ALL)
         .border_style(theme.border_style())
         .style(theme.style())
-        .title(" Configurações (↑↓/jk: Navegar | Enter/Espaço: Alternar/Editar | Esc: Voltar) ");
+        .title(
+            " Configurações (↑↓/jk: Navegar | Enter/Espaço: Alternar/Editar | r: Atualizar ambiente | Esc: Voltar) ",
+        );
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -59,6 +62,15 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
             )));
         }
     }
+
+    // Seção somente leitura com diagnóstico do ambiente gráfico.
+    lines.push(Line::from(""));
+    lines.push(section_line(SettingsSection::Desktop, theme));
+    lines.extend(desktop_diagnostic_lines(&app.desktop, theme));
+    lines.push(Line::from(Span::styled(
+        "      Pressione r para atualizar a detecção e a disponibilidade do serviço.",
+        Style::default().fg(theme.muted_fg).italic(),
+    )));
 
     // Seção reservada para preferências visuais futuras.
     if current_section != Some(SettingsSection::Appearance) {
@@ -138,11 +150,73 @@ fn setting_line(app: &App, setting: SettingId, is_selected: bool, theme: &Theme)
     ])
 }
 
+fn desktop_diagnostic_lines(diagnostics: &DesktopDiagnostics, theme: &Theme) -> Vec<Line<'static>> {
+    let service_color = match diagnostics.availability {
+        ServiceAvailability::Available => theme.completed_fg,
+        ServiceAvailability::Unavailable => theme.overdue_fg,
+        ServiceAvailability::Unknown => theme.due_today_fg,
+    };
+
+    let delivery_color = if !diagnostics.delivery_enabled {
+        theme.muted_fg
+    } else if diagnostics.availability == ServiceAvailability::Available {
+        theme.completed_fg
+    } else {
+        theme.overdue_fg
+    };
+
+    vec![
+        diagnostic_line(
+            "Desktop detectado",
+            &diagnostics.desktop_label(),
+            theme.fg,
+            theme,
+        ),
+        diagnostic_line("Sessão", diagnostics.session_label(), theme.fg, theme),
+        diagnostic_line("Backend", diagnostics.backend_label(), theme.fg, theme),
+        diagnostic_line(
+            "Serviço de notificações",
+            diagnostics.service_label(),
+            service_color,
+            theme,
+        ),
+        diagnostic_line(
+            "Entrega de notificações",
+            diagnostics.delivery_label(),
+            delivery_color,
+            theme,
+        ),
+        diagnostic_line(
+            "Diagnóstico",
+            &diagnostics.diagnostic,
+            theme.muted_fg,
+            theme,
+        ),
+    ]
+}
+
+fn diagnostic_line(
+    label: &str,
+    value: &str,
+    value_color: ratatui::style::Color,
+    theme: &Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("      {:<28}", label),
+            Style::default().fg(theme.muted_fg),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(value_color).bold()),
+    ])
+}
+
 fn render_footer(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
     let mut lines = Vec::new();
 
     if let Some(feedback) = &app.settings.feedback {
-        let color = if feedback.starts_with("Configurações salvas") {
+        let color = if feedback.starts_with("Configurações salvas")
+            || feedback.starts_with("Diagnóstico")
+        {
             theme.completed_fg
         } else {
             theme.overdue_fg
@@ -162,4 +236,130 @@ fn render_footer(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
 
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true });
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop::detection::{DesktopEnvironment, DesktopSession, SessionType};
+    use crate::desktop::notifications::{BackendKind, ServiceAvailability};
+
+    fn diagnostics(
+        environment: DesktopEnvironment,
+        session_type: SessionType,
+        backend: BackendKind,
+        availability: ServiceAvailability,
+        delivery_enabled: bool,
+    ) -> DesktopDiagnostics {
+        DesktopDiagnostics {
+            session: DesktopSession {
+                environment,
+                session_type,
+                raw_desktop: None,
+            },
+            backend,
+            availability,
+            delivery_enabled,
+            diagnostic: "mensagem de diagnóstico".to_string(),
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn rendered_text(diagnostics: &DesktopDiagnostics) -> Vec<String> {
+        desktop_diagnostic_lines(diagnostics, &Theme::default())
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn renders_detected_desktop_and_session_type() {
+        let diagnostics = diagnostics(
+            DesktopEnvironment::KdePlasma,
+            SessionType::Wayland,
+            BackendKind::Kde,
+            ServiceAvailability::Available,
+            true,
+        );
+
+        let text = rendered_text(&diagnostics);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Desktop detectado") && line.contains("KDE Plasma"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Sessão") && line.contains("Wayland"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Backend") && line.contains("KDE / Freedesktop D-Bus"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Serviço de notificações") && line.contains("Disponível"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Entrega de notificações") && line.contains("Ativada"))
+        );
+    }
+
+    #[test]
+    fn renders_headless_session_without_misleading_success() {
+        let diagnostics = diagnostics(
+            DesktopEnvironment::Headless,
+            SessionType::Headless,
+            BackendKind::Noop,
+            ServiceAvailability::Unavailable,
+            true,
+        );
+
+        let text = rendered_text(&diagnostics);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Desktop detectado") && line.contains("Nenhum"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Sessão") && line.contains("Headless"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Serviço de notificações")
+                    && line.contains("Indisponível"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("sem backend disponível"))
+        );
+    }
+
+    #[test]
+    fn renders_disabled_delivery_explicitly() {
+        let diagnostics = diagnostics(
+            DesktopEnvironment::Gnome,
+            SessionType::X11,
+            BackendKind::Freedesktop,
+            ServiceAvailability::Available,
+            false,
+        );
+
+        let text = rendered_text(&diagnostics);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Entrega de notificações")
+                    && line.contains("Desativada (configuração)"))
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("mensagem de diagnóstico"))
+        );
+    }
 }

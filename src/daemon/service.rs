@@ -2,6 +2,10 @@ use crate::config::Config;
 use crate::daemon::notifications::{NoopNotifier, NotificationService, Notifier};
 use crate::daemon::scheduler::{CheckReport, Scheduler};
 use crate::db;
+use crate::desktop::detection::DesktopSession;
+use crate::desktop::notifications::{
+    BackendPreference, DesktopNotifierFactory, ServiceAvailability, select_backend,
+};
 use crate::errors::AppResult;
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
@@ -29,12 +33,29 @@ impl DaemonService {
         let scheduler = Scheduler::from_config(&config);
         let notifications = NotificationService::from_config(&config.notifications);
 
+        // A seleção do backend é feita uma única vez por execução. O daemon
+        // não conhece detalhes de KDE ou D-Bus: apenas recebe um `Notifier`.
+        let notifier: Box<dyn Notifier> = if config.notifications.enabled {
+            let session = DesktopSession::detect();
+            let preference = BackendPreference::parse(&config.notifications.desktop.backend);
+            let selection =
+                select_backend(&session, preference, &DesktopNotifierFactory::default());
+
+            if selection.availability != ServiceAvailability::Available {
+                eprintln!("Calma daemon: {}", selection.diagnostic);
+            }
+
+            selection.notifier
+        } else {
+            Box::new(NoopNotifier)
+        };
+
         Ok(Self {
             config,
             conn,
             scheduler,
             notifications,
-            notifier: Box::new(NoopNotifier),
+            notifier,
             running: false,
             last_report: None,
         })
@@ -72,12 +93,20 @@ impl DaemonService {
         }
 
         let now = chrono::Local::now().naive_local();
+        self.notifications.begin_day(now.date());
         let report = self.scheduler.check(&self.conn, &self.config, now)?;
         let notifications = self
             .notifications
             .build(&report, &self.config.notifications);
-        self.notifications
-            .dispatch(&notifications, self.notifier.as_mut())?;
+
+        // Falhas de notificação não podem encerrar o daemon: o serviço
+        // continua verificando prazos e eventos mesmo sem área de trabalho.
+        if let Err(err) = self
+            .notifications
+            .dispatch(&notifications, self.notifier.as_mut())
+        {
+            eprintln!("Calma daemon: falha ao entregar notificação: {}", err);
+        }
 
         self.scheduler.mark_checked(Instant::now());
         self.last_report = Some(report.clone());
@@ -130,8 +159,7 @@ impl DaemonService {
 mod tests {
     use super::*;
     use crate::config::{GeneralSettings, NotificationSettings};
-    use crate::daemon::notifications::{Notification, Notifier};
-    use crate::errors::AppResult;
+    use crate::daemon::notifications::{Notification, NotificationError, Notifier};
     use crate::models::task::Task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,9 +171,17 @@ mod tests {
     }
 
     impl Notifier for CountingNotifier {
-        fn notify(&mut self, _notification: &Notification) -> AppResult<()> {
+        fn notify(&mut self, _notification: &Notification) -> Result<(), NotificationError> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    struct FailingNotifier;
+
+    impl Notifier for FailingNotifier {
+        fn notify(&mut self, _notification: &Notification) -> Result<(), NotificationError> {
+            Err(NotificationError::Delivery("falha simulada".into()))
         }
     }
 
@@ -230,9 +266,81 @@ mod tests {
         service.set_notifier(Box::new(counting));
         let report = service.tick().expect("tick deve funcionar");
 
-        assert_eq!(report.upcoming_tasks.len(), 1);
+        assert_eq!(report.tasks_today.len(), 1);
         assert!(service.last_report().is_some());
         assert_eq!(delivered.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn repeated_ticks_do_not_repeat_today_notifications() {
+        let path = temp_db_path("dedup");
+        let config = Config {
+            database_path: path.clone(),
+            general: GeneralSettings {
+                background_monitoring: true,
+                ..GeneralSettings::default()
+            },
+            notifications: NotificationSettings {
+                enabled: true,
+                upcoming_tasks: true,
+                overdue_tasks: false,
+                upcoming_events: false,
+                ..NotificationSettings::default()
+            },
+            ..Config::default()
+        };
+
+        let mut service = DaemonService::new(config).expect("daemon deve inicializar");
+        let today = chrono::Local::now().date_naive();
+        let mut task = Task::new("Tarefa de hoje".into());
+        task.due_date = Some(today);
+        db::insert_task(&service.conn, &task).expect("tarefa deve ser inserida");
+
+        let counting = CountingNotifier::default();
+        let delivered = counting.count.clone();
+        service.set_notifier(Box::new(counting));
+
+        service.tick().expect("primeiro tick deve funcionar");
+        service.tick().expect("segundo tick deve funcionar");
+        service.tick().expect("terceiro tick deve funcionar");
+
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn notification_delivery_failure_does_not_stop_the_daemon() {
+        let path = temp_db_path("delivery-failure");
+        let config = Config {
+            database_path: path.clone(),
+            general: GeneralSettings {
+                background_monitoring: true,
+                ..GeneralSettings::default()
+            },
+            notifications: NotificationSettings {
+                enabled: true,
+                upcoming_tasks: true,
+                ..NotificationSettings::default()
+            },
+            ..Config::default()
+        };
+
+        let mut service = DaemonService::new(config).expect("daemon deve inicializar");
+        let today = chrono::Local::now().date_naive();
+        let mut task = Task::new("Tarefa de hoje".into());
+        task.due_date = Some(today);
+        db::insert_task(&service.conn, &task).expect("tarefa deve ser inserida");
+
+        service.set_notifier(Box::new(FailingNotifier));
+        let report = service
+            .tick()
+            .expect("falha de notificação não deve encerrar o tick");
+
+        assert_eq!(report.tasks_today.len(), 1);
+        assert!(service.last_report().is_some());
 
         let _ = std::fs::remove_file(path);
     }

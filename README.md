@@ -82,16 +82,19 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
    - Eventos também aparecem no calendário mensal e no painel do dia selecionado.
 
 10. **Configurações Persistentes**:
-   - Tela dedicada (`6`) com seções **Geral**, **Notificações** e **Aparência**.
+   - Tela dedicada (`6`) com seções **Geral**, **Notificações**, **Ambiente Gráfico** e **Aparência**.
    - Alternância de opções booleanas e edição de intervalos numéricos com validação.
    - Salvamento imediato em `~/.config/calma/config.toml` (ou `$XDG_CONFIG_HOME/calma/config.toml`).
    - Padrões conservadores: daemon, início automático e todas as categorias de notificação começam desativados.
    - Valores inválidos são normalizados com segurança; arquivos malformados nunca são sobrescritos automaticamente.
+   - A seção **Ambiente Gráfico** é somente leitura e mostra desktop, sessão, backend, disponibilidade do serviço e diagnóstico; `r` atualiza a detecção.
 
-11. **Fundação do Daemon Independente**:
+11. **Daemon Independente e Notificações Nativas**:
    - Separação entre o ciclo de vida da TUI e um processo de daemon que compartilha o mesmo SQLite.
    - Estrutura modular com serviço, agendador periódico e abstração de notificações.
-   - Execução manual em primeiro plano com `calma daemon`; integração com systemd, IPC e notificações desktop ficam para fases futuras.
+   - Entrega nativa pelo barramento D-Bus da sessão via `org.freedesktop.Notifications`, com suporte verificado em KDE Plasma.
+   - Avisos únicos por tarefa/evento no dia e um aviso adicional dentro da antecedência configurada para eventos com horário.
+   - Execução manual em primeiro plano com `calma daemon`; integração com systemd e IPC continuam fora do escopo.
 
 ---
 
@@ -115,11 +118,12 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
 | `j` / `k` | Selecionar tarefa no painel lateral do calendário |
 | `←` `→` | Navegar pelos dias da semana no calendário |
 | `PgUp` / `PgDn` | Mês anterior / Próximo mês no calendário |
+| `r` | Atualizar o diagnóstico do ambiente gráfico nas Configurações |
 | `?` | Abrir tela de ajuda com todos os atalhos |
 | `Esc` | Fechar modal / Cancelar / Voltar |
 | `q` | Sair do aplicativo |
 
-Na tela de Configurações: `↑`/`↓` ou `j`/`k` navegam, `Enter`/`Espaço` alternam opções booleanas ou iniciam a edição de valores numéricos, `Esc` retorna à tela anterior e `q` encerra o Calma.
+Na tela de Configurações: `↑`/`↓` ou `j`/`k` navegam, `Enter`/`Espaço` alternam opções booleanas ou iniciam a edição de valores numéricos, `r` atualiza a detecção do ambiente e a disponibilidade do serviço, `Esc` retorna à tela anterior e `q` encerra o Calma.
 
 ---
 
@@ -128,6 +132,7 @@ Na tela de Configurações: `↑`/`↓` ou `j`/`k` navegam, `Enter`/`Espaço` al
 - **Linux** (Arch Linux, Debian, Ubuntu, Fedora ou qualquer distribuição moderna).
 - **Rust & Cargo** (versão 1.80+ recomendada).
 - Biblioteca SQLite3 (`libsqlite3-dev` no Debian/Ubuntu, `sqlite` no Arch Linux).
+- Para notificações desktop: sessão gráfica com barramento D-Bus de sessão e um serviço `org.freedesktop.Notifications` (KDE Plasma é o ambiente testado).
 
 ---
 
@@ -146,6 +151,10 @@ cargo run -- daemon
 ```
 
 O daemon só executa verificações quando o **monitoramento em segundo plano** está ativado na tela de Configurações. Ele é um processo separado da TUI e compartilha o mesmo banco SQLite.
+
+Para entregar notificações, o daemon precisa herdar o ambiente da sessão gráfica, em especial `DBUS_SESSION_BUS_ADDRESS` e, quando aplicável, `WAYLAND_DISPLAY` ou `DISPLAY`. Iniciar o daemon manualmente a partir de um terminal da própria sessão atende a esse requisito. O Calma **não** implementa integração com systemd nesta fase; um serviço de usuário iniciado fora da sessão pode não ter acesso ao barramento correto.
+
+Se nenhum backend estiver disponível, o daemon continua executando normalmente e registra o diagnóstico em `stderr`. Notificações são deduplicadas em memória: cada tarefa ou evento gera no máximo um aviso por marco (dia do item e antecedência do evento) durante a execução do daemon. Reiniciar o processo reinicia esse estado.
 
 ### Executar a suíte de testes automatizados:
 
@@ -214,9 +223,19 @@ calma/
     ├── input.rs        # Mapeamento e processamento de eventos do Crossterm
     ├── daemon/         # Daemon independente da TUI
     │   ├── mod.rs
-    │   ├── service.rs       # Ciclo de vida do daemon
+    │   ├── service.rs       # Ciclo de vida e seleção do backend de notificação
     │   ├── scheduler.rs     # Verificações periódicas de prazos e eventos
-    │   └── notifications.rs # Abstração de notificações (sem entrega desktop ainda)
+    │   └── notifications.rs # Geração de notificações e reexportação da abstração
+    ├── desktop/        # Detecção de ambiente e entrega nativa
+    │   ├── mod.rs
+    │   ├── detection.rs     # DesktopEnvironment, SessionType e DesktopSession
+    │   ├── environment.rs   # Snapshot injetável das variáveis de ambiente
+    │   └── notifications/
+    │       ├── mod.rs       # Seleção de backend e diagnóstico
+    │       ├── notifier.rs  # Notification, Notifier e NotificationError
+    │       ├── freedesktop.rs # D-Bus org.freedesktop.Notifications (zbus)
+    │       ├── kde.rs       # Invólucro fino sobre o backend Freedesktop
+    │       └── noop.rs      # Fallback sem efeitos colaterais
     ├── models/         # Entidades de domínio (Task, Project, Event)
     │   ├── mod.rs
     │   ├── task.rs
@@ -242,6 +261,117 @@ calma/
         ├── settings.rs
         └── modal.rs
 ```
+
+## 🔔 Notificações Desktop e Detecção de Ambiente
+
+### Ambientes suportados na detecção
+
+A detecção lê múltiplas variáveis (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`, `KDE_SESSION_VERSION`, `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`, `DISPLAY` e `DBUS_SESSION_BUS_ADDRESS`) e reconhece:
+
+- KDE Plasma
+- GNOME
+- XFCE
+- Cinnamon
+- MATE
+- LXQt
+- i3
+- Sway
+- ambiente desconhecido (sessão gráfica sem identificação)
+- headless (sem sessão gráfica)
+
+A ordem de prioridade é `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP` e `DESKTOP_SESSION`. Se a fonte prioritária contiver apenas valores desconhecidos, as seguintes são consultadas. `KDE_SESSION_VERSION` funciona como último indício de KDE. A presença de D-Bus, sozinha, não caracteriza uma sessão gráfica.
+
+**Detectar o desktop é diferente de o serviço de notificações estar disponível.** O Calma não considera o KDE disponível apenas porque pacotes KDE estão instalados; a disponibilidade é verificada em tempo de execução pela chamada D-Bus `GetServerInformation`.
+
+### Backends de notificação
+
+- **KDE / Freedesktop D-Bus**: alvo verificado, usado no KDE Plasma por meio da especificação `org.freedesktop.Notifications`.
+- **Freedesktop D-Bus**: mesmo protocolo, sem duplicação de implementação, para GNOME, XFCE, Cinnamon, MATE, LXQt e outros ambientes compatíveis.
+- **Noop**: fallback seguro quando não há ambiente gráfico ou serviço disponível.
+
+Valores aceitos em `[notifications.desktop] backend`:
+
+- `auto`: seleciona KDE no Plasma e Freedesktop nos demais ambientes, com fallback para Noop.
+- `kde`: força o backend KDE/Freedesktop.
+- `freedesktop`: força o backend Freedesktop genérico.
+- `noop`: desativa a entrega sem remover as preferências.
+- Qualquer outro valor gera diagnóstico e cai de volta em `auto`.
+
+A entrega usa `zbus` com API bloqueante, uma conexão reutilizada, tempo limite de método (2 segundos por padrão) e sem runtime assíncrono próprio. As chamadas usam `Notify` com nome de aplicativo `Calma`. Não há chamada a `notify-send` nem construção manual de mensagens D-Bus.
+
+### Configuração
+
+```toml
+[notifications]
+enabled = false
+upcoming_tasks = false
+overdue_tasks = false
+upcoming_events = false
+advance_minutes = 60
+
+[notifications.desktop]
+backend = "auto"
+```
+
+Configurações antigas sem a seção `[notifications.desktop]` continuam válidas e recebem `backend = "auto"`. O resultado da detecção é sempre de runtime e nunca é gravado no TOML.
+
+### Comportamento dos avisos
+
+- Tarefas não concluídas com `due_date` ou `scheduled_date` igual ao dia atual geram um aviso uma única vez.
+- Tarefas atrasadas geram no máximo um aviso por dia.
+- Eventos do dia geram um aviso único no dia; eventos já encerrados são ignorados.
+- Eventos com horário de início geram um segundo aviso único quando faltam `advance_minutes` minutos ou menos para começar.
+- Eventos de dia inteiro (`start_time` ausente) recebem apenas o aviso do dia.
+- A identidade do aviso inclui o tipo, o item, a data e o marco (dia ou antecedência), permitindo que o mesmo evento receba os dois avisos previstos sem repetição.
+- A deduplicação é feita em memória e reiniciada quando o dia muda. Reiniciar o daemon pode repetir um aviso já enviado.
+
+### Tela de Configurações
+
+A seção **AMBIENTE GRÁFICO** mostra, em modo somente leitura:
+
+```text
+Desktop detectado: KDE Plasma
+Sessão: Wayland
+Backend: KDE / Freedesktop D-Bus
+Serviço de notificações: Disponível
+Entrega de notificações: Ativada
+Diagnóstico: Serviço de notificações disponível via KDE / Freedesktop D-Bus.
+```
+
+Quando não há ambiente gráfico, os campos indicam `Desktop detectado: Nenhum`, `Sessão: Headless`, `Backend: Nenhum` e `Serviço de notificações: Indisponível`. A entrega também é mostrada como desativada quando a configuração assim determina, evitando estados de sucesso enganosos. `r` atualiza o diagnóstico sem reiniciar a TUI.
+
+### Verificação manual em uma sessão real
+
+Em uma sessão KDE Plasma com D-Bus ativo:
+
+```bash
+cargo test manual_kde_notification_smoke -- --ignored --nocapture
+```
+
+Esse teste envia uma notificação real. A suíte padrão (`cargo test`) não depende de sessão gráfica, de D-Bus ou de KDE; todos os testes de detecção e de entrega usam dados e transportes injetados.
+
+### Limitações atuais
+
+- A entrega foi verificada automaticamente via D-Bus real apenas no KDE Plasma deste ambiente de desenvolvimento. GNOME, XFCE e os demais ambientes são suportados pela arquitetura e pelo protocolo Freedesktop, mas não foram verificados manualmente nesta entrega.
+- Não há backend para Windows ou macOS.
+- Não há integração com systemd, IPC ou rede.
+- A deduplicação é apenas em memória: reiniciar o daemon pode repetir um aviso já enviado no mesmo dia.
+- O aviso de antecedência é emitido na primeira verificação que encontrar o evento dentro da janela configurada; com `poll_interval_secs = 1800`, por exemplo, ele pode chegar um pouco menos de 60 minutos antes.
+- A seleção do backend é feita uma vez na inicialização do daemon; se o serviço de notificações só ficar disponível depois, reinicie o daemon.
+- A detecção depende de variáveis de ambiente; sessões iniciadas por SSH, contêineres ou serviços de usuário podem apresentar valores incompletos.
+- Notificações são entregues apenas pelo daemon; a TUI não envia notificações.
+
+### Como adicionar um novo backend
+
+1. Implemente `Notifier` em `src/desktop/notifications/`.
+2. Adicione o novo valor em `BackendKind` e na fábrica `NotifierFactory`.
+3. Registre a preferência em `BackendPreference::parse`.
+4. Adicione testes com transporte/fábrica falsos.
+5. O daemon, o agendador e a geração de notificações não precisam ser alterados.
+
+Para ambientes Linux que já falam Freedesktop, reutilize o backend existente em vez de criar uma implementação duplicada.
+
+---
 
 [English translation]
 
@@ -329,16 +459,19 @@ Help you organize your academic, personal, and financial life without requiring 
    - Events also appear in the monthly calendar and in the selected day's side panel.
 
 10. **Persistent Settings**:
-   - Dedicated screen (`6`) with **General**, **Notifications**, and **Appearance** sections.
+   - Dedicated screen (`6`) with **General**, **Notifications**, **Desktop Environment**, and **Appearance** sections.
    - Boolean toggles and validated numeric intervals.
    - Changes are saved immediately to `~/.config/calma/config.toml` (or `$XDG_CONFIG_HOME/calma/config.toml`).
    - Conservative defaults: daemon, automatic startup, and all notification categories are disabled.
    - Invalid values are safely normalized; malformed files are never overwritten automatically.
+   - The **Desktop Environment** section is read-only and shows the detected desktop, session type, backend, service availability, and diagnostic message; `r` refreshes detection.
 
-11. **Independent Daemon Foundation**:
+11. **Independent Daemon and Native Notifications**:
    - TUI lifecycle is separate from a daemon process that shares the same SQLite database.
    - Modular service, periodic scheduler, and notification abstraction.
-   - Manual foreground execution with `calma daemon`; systemd integration, IPC, and desktop delivery are future work.
+   - Native delivery through the session D-Bus using `org.freedesktop.Notifications`, with verified support on KDE Plasma.
+   - One notification per task/event on its day, plus one additional notification within the configured lead time for timed events.
+   - Manual foreground execution with `calma daemon`; systemd integration and IPC remain out of scope.
 
 ---
 
@@ -361,11 +494,12 @@ Help you organize your academic, personal, and financial life without requiring 
 | `j` / `k` | Select a task in the calendar's side panel |
 | `←` `→` | Navigate between weekdays in the calendar |
 | `PgUp` / `PgDn` | Previous month / Next month in the calendar |
+| `r` | Refresh the desktop environment diagnostics in Settings |
 | `?` | Open the help screen with all keyboard shortcuts |
 | `Esc` | Close modal / Cancel / Go back |
 | `q` | Quit the application |
 
-In the Settings screen: `↑`/`↓` or `j`/`k` navigate, `Enter`/`Space` toggle booleans or start editing numeric values, `Esc` returns to the previous view, and `q` quits Calma.
+In the Settings screen: `↑`/`↓` or `j`/`k` navigate, `Enter`/`Space` toggle booleans or start editing numeric values, `r` refreshes environment detection and service availability, `Esc` returns to the previous view, and `q` quits Calma.
 
 ---
 
@@ -374,6 +508,7 @@ In the Settings screen: `↑`/`↓` or `j`/`k` navigate, `Enter`/`Space` toggle 
 - **Linux** (Arch Linux, Debian, Ubuntu, Fedora, or any modern distribution).
 - **Rust & Cargo** (version 1.80+ recommended).
 - SQLite3 library (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch Linux).
+- For desktop notifications: a graphical session with a session D-Bus and an `org.freedesktop.Notifications` service (KDE Plasma is the tested environment).
 
 ---
 
@@ -392,6 +527,10 @@ cargo run -- daemon
 ```
 
 The daemon only performs checks when **background monitoring** is enabled in the Settings screen. It is a separate process from the TUI and shares the same SQLite database.
+
+To deliver notifications, the daemon must inherit the graphical session environment, especially `DBUS_SESSION_BUS_ADDRESS` and, when applicable, `WAYLAND_DISPLAY` or `DISPLAY`. Starting the daemon manually from a terminal inside the session satisfies this requirement. Calma does **not** implement systemd integration at this stage; a user service started outside the session may not have access to the correct bus.
+
+If no backend is available, the daemon keeps running normally and writes the diagnostic to `stderr`. Notifications are deduplicated in memory: each task or event produces at most one notification per milestone (day-of and event lead time) while the daemon runs. Restarting the process resets that state.
 
 ### Run the automated test suite:
 
@@ -449,6 +588,119 @@ cp ~/backup_calma_*.db ~/.local/share/calma/calma.db
 
 ---
 
+---
+
+## 🔔 Desktop Notifications and Environment Detection
+
+### Environments supported by detection
+
+Detection reads multiple variables (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`, `KDE_SESSION_VERSION`, `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`, `DISPLAY`, and `DBUS_SESSION_BUS_ADDRESS`) and recognizes:
+
+- KDE Plasma
+- GNOME
+- XFCE
+- Cinnamon
+- MATE
+- LXQt
+- i3
+- Sway
+- unknown environment (graphical session without identification)
+- headless (no graphical session)
+
+Priority is `XDG_CURRENT_DESKTOP`, then `XDG_SESSION_DESKTOP`, then `DESKTOP_SESSION`. If the priority source contains only unknown values, the following sources are still consulted. `KDE_SESSION_VERSION` acts as a last KDE hint. The presence of D-Bus alone does not indicate a graphical session.
+
+**Detecting the desktop is different from knowing whether the notification service is available.** Calma does not consider KDE available merely because KDE packages are installed; availability is checked at runtime through the `GetServerInformation` D-Bus call.
+
+### Notification backends
+
+- **KDE / Freedesktop D-Bus**: verified target, used on KDE Plasma through the `org.freedesktop.Notifications` specification.
+- **Freedesktop D-Bus**: the same protocol, without duplicated implementation, for GNOME, XFCE, Cinnamon, MATE, LXQt, and other compatible environments.
+- **Noop**: safe fallback when there is no graphical environment or available service.
+
+Accepted values for `[notifications.desktop] backend`:
+
+- `auto`: selects KDE on Plasma and Freedesktop on other environments, falling back to Noop.
+- `kde`: forces the KDE/Freedesktop backend.
+- `freedesktop`: forces the generic Freedesktop backend.
+- `noop`: disables delivery without removing preferences.
+- Any other value produces a diagnostic and falls back to `auto`.
+
+Delivery uses `zbus` with its blocking API, a reused connection, a method timeout (2 seconds by default), and no proprietary async runtime. Calls use `Notify` with the application name `Calma`. It does not shell out to `notify-send` and does not hand-build D-Bus messages.
+
+### Configuration
+
+```toml
+[notifications]
+enabled = false
+upcoming_tasks = false
+overdue_tasks = false
+upcoming_events = false
+advance_minutes = 60
+
+[notifications.desktop]
+backend = "auto"
+```
+
+Older configurations without `[notifications.desktop]` remain valid and receive `backend = "auto"`. Detection results are always runtime-only and are never written to TOML.
+
+### Notification behavior
+
+- Non-completed tasks whose `due_date` or `scheduled_date` is today generate one notification.
+- Overdue tasks generate at most one notification per day.
+- Events occurring today generate one notification that day; events that already ended are ignored.
+- Timed events generate a second, distinct notification once the event starts within `advance_minutes` minutes.
+- All-day events (`start_time` absent) receive only the day-of notification.
+- The notification identity includes the kind, item, date, and milestone (day-of or lead time), so the same event can receive both expected notifications without repetition.
+- Deduplication is in memory and resets when the day changes. Restarting the daemon may repeat a notification already sent.
+
+### Settings screen
+
+The **AMBIENTE GRÁFICO** (Desktop Environment) section shows, read-only:
+
+```text
+Desktop detectado: KDE Plasma
+Sessão: Wayland
+Backend: KDE / Freedesktop D-Bus
+Serviço de notificações: Disponível
+Entrega de notificações: Ativada
+Diagnóstico: Serviço de notificações disponível via KDE / Freedesktop D-Bus.
+```
+
+When there is no graphical environment, the fields show `Desktop detectado: Nenhum`, `Sessão: Headless`, `Backend: Nenhum`, and `Serviço de notificações: Indisponível`. Delivery also shows as disabled when configuration says so, avoiding misleading success states. `r` refreshes the diagnostics without restarting the TUI.
+
+### Manual verification in a real session
+
+On a KDE Plasma session with D-Bus active:
+
+```bash
+cargo test manual_kde_notification_smoke -- --ignored --nocapture
+```
+
+This test sends a real notification. The default suite (`cargo test`) does not depend on a graphical session, D-Bus, or KDE; all detection and delivery tests use injected data and transports.
+
+### Current limitations
+
+- Delivery was verified automatically through real D-Bus only on KDE Plasma in this development environment. GNOME, XFCE, and other environments are supported by the architecture and Freedesktop protocol, but were not manually verified in this delivery.
+- There is no Windows or macOS backend.
+- There is no systemd integration, IPC, or networking.
+- Deduplication is memory-only: restarting the daemon may repeat a notification already sent that day.
+- The lead-time notification is emitted on the first check that finds the event inside the configured window; with `poll_interval_secs = 1800`, for example, it may arrive slightly less than 60 minutes before the event.
+- The backend is selected once when the daemon starts; if the notification service only becomes available later, restart the daemon.
+- Detection depends on environment variables; sessions started via SSH, containers, or user services may expose incomplete values.
+- Notifications are delivered only by the daemon; the TUI does not send notifications.
+
+### Adding a new backend
+
+1. Implement `Notifier` under `src/desktop/notifications/`.
+2. Add the new value to `BackendKind` and to the `NotifierFactory`.
+3. Register the preference in `BackendPreference::parse`.
+4. Add tests with fake transports/factories.
+5. The daemon, scheduler, and notification generation do not need changes.
+
+For Linux environments that already speak Freedesktop, reuse the existing backend instead of creating a duplicated implementation.
+
+---
+
 ## 🏗 Project Architecture
 
 ```text
@@ -463,9 +715,19 @@ calma/
     ├── input.rs        # Crossterm event mapping and processing
     ├── daemon/         # TUI-independent daemon foundation
     │   ├── mod.rs
-    │   ├── service.rs       # Daemon lifecycle
+    │   ├── service.rs       # Lifecycle and notification backend selection
     │   ├── scheduler.rs     # Periodic deadline/event checks
-    │   └── notifications.rs # Notification abstraction (no desktop delivery yet)
+    │   └── notifications.rs # Notification generation and abstraction re-exports
+    ├── desktop/        # Environment detection and native delivery
+    │   ├── mod.rs
+    │   ├── detection.rs     # DesktopEnvironment, SessionType, and DesktopSession
+    │   ├── environment.rs   # Injectable environment snapshot
+    │   └── notifications/
+    │       ├── mod.rs       # Backend selection and diagnostics
+    │       ├── notifier.rs  # Notification, Notifier, and NotificationError
+    │       ├── freedesktop.rs # org.freedesktop.Notifications over D-Bus (zbus)
+    │       ├── kde.rs       # Thin wrapper over the Freedesktop backend
+    │       └── noop.rs      # Side-effect-free fallback
     ├── models/         # Domain entities (Task, Project, Event)
     │   ├── mod.rs
     │   ├── task.rs

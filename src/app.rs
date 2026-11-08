@@ -2,6 +2,7 @@ use crate::config::{
     Config, MAX_NOTIFICATION_ADVANCE_MINUTES, MAX_POLL_INTERVAL_SECS,
     MIN_NOTIFICATION_ADVANCE_MINUTES, MIN_POLL_INTERVAL_SECS,
 };
+use crate::desktop::notifications::DesktopDiagnostics;
 use crate::errors::AppResult;
 use crate::models::event::Event;
 use crate::models::project::Project;
@@ -110,6 +111,7 @@ pub enum View {
 pub enum SettingsSection {
     General,
     Notifications,
+    Desktop,
     Appearance,
 }
 
@@ -118,6 +120,7 @@ impl SettingsSection {
         match self {
             SettingsSection::General => "GERAL",
             SettingsSection::Notifications => "NOTIFICAÇÕES",
+            SettingsSection::Desktop => "AMBIENTE GRÁFICO",
             SettingsSection::Appearance => "APARÊNCIA",
         }
     }
@@ -171,10 +174,10 @@ impl SettingId {
             SettingId::BackgroundMonitoring => "Monitoramento em segundo plano",
             SettingId::PollInterval => "Intervalo de verificação",
             SettingId::NotificationsEnabled => "Notificações da área de trabalho",
-            SettingId::UpcomingTasks => "Avisar sobre prazos próximos",
+            SettingId::UpcomingTasks => "Avisar sobre tarefas do dia",
             SettingId::OverdueTasks => "Avisar sobre tarefas atrasadas",
-            SettingId::UpcomingEvents => "Avisar sobre eventos próximos",
-            SettingId::NotificationAdvance => "Antecedência das notificações",
+            SettingId::UpcomingEvents => "Avisar sobre eventos do dia e próximos",
+            SettingId::NotificationAdvance => "Antecedência do aviso de evento",
         }
     }
 
@@ -188,12 +191,18 @@ impl SettingId {
             }
             SettingId::PollInterval => "Intervalo entre verificações do daemon.",
             SettingId::NotificationsEnabled => {
-                "Requer monitoramento em segundo plano e daemon ativo; a entrega desktop será implementada futuramente."
+                "Requer monitoramento em segundo plano e o daemon ativo; o backend é selecionado em tempo de execução."
             }
-            SettingId::UpcomingTasks => "Requer notificações habilitadas.",
-            SettingId::OverdueTasks => "Requer notificações habilitadas.",
-            SettingId::UpcomingEvents => "Requer notificações habilitadas.",
-            SettingId::NotificationAdvance => "Tempo de antecedência usado para prazos e eventos.",
+            SettingId::UpcomingTasks => {
+                "Avisa uma vez quando a tarefa vence ou está agendada para o dia."
+            }
+            SettingId::OverdueTasks => "Avisa uma vez por dia sobre tarefas atrasadas.",
+            SettingId::UpcomingEvents => {
+                "Avisa uma vez no dia do evento e uma vez antes do horário de início."
+            }
+            SettingId::NotificationAdvance => {
+                "Minutos antes do início de um evento em que o aviso deve ser enviado."
+            }
         }
     }
 
@@ -377,6 +386,10 @@ pub struct App {
     pub selected_day: Option<NaiveDate>,
     /// Configuração centralizada carregada do disco.
     pub config: Config,
+    /// Diagnóstico de ambiente gráfico exibido nas configurações.
+    ///
+    /// É derivado em tempo de execução e nunca persistido.
+    pub desktop: DesktopDiagnostics,
     /// Estado de navegação/edição da tela de configurações.
     pub settings: SettingsState,
 }
@@ -390,6 +403,9 @@ impl App {
     /// Cria a aplicação usando uma configuração já carregada.
     pub fn with_config(config: Config) -> Self {
         let today = chrono::Local::now().date_naive();
+        // A detecção do desktop é barata; a verificação do serviço D-Bus é
+        // adiada até a abertura das configurações ou um pedido de refresh.
+        let desktop = DesktopDiagnostics::detect_environment(&config);
         Self {
             today,
             tasks: Vec::new(),
@@ -411,6 +427,7 @@ impl App {
             calendar_month: today.month(),
             selected_day: Some(today),
             config,
+            desktop,
             settings: SettingsState::default(),
         }
     }
@@ -1258,7 +1275,16 @@ impl App {
             self.current_view = View::Configuracoes;
             self.settings.feedback = None;
             self.settings.editing_value = None;
+            self.desktop = DesktopDiagnostics::detect(&self.config);
         }
+    }
+
+    /// Reexecuta a detecção do ambiente e a verificação do serviço.
+    ///
+    /// Não altera configurações e não persiste nenhum resultado.
+    pub fn refresh_desktop_diagnostics(&mut self) {
+        self.desktop = DesktopDiagnostics::detect(&self.config);
+        self.settings.feedback = Some("Diagnóstico de ambiente atualizado.".to_string());
     }
 
     /// Retorna à visualização anterior sem descartar configurações salvas.
@@ -1566,6 +1592,27 @@ mod tests {
         assert_eq!(app.current_view, View::Calendario);
 
         cleanup_config(&path);
+    }
+
+    #[test]
+    fn desktop_diagnostics_reflect_runtime_configuration() {
+        let mut app = App::new();
+        app.config.notifications.enabled = true;
+
+        app.refresh_desktop_diagnostics();
+
+        assert!(app.desktop.delivery_enabled);
+        assert!(
+            app.settings
+                .feedback
+                .as_deref()
+                .is_some_and(|message| message.contains("Diagnóstico"))
+        );
+        // O resultado da detecção nunca é gravado na configuração.
+        assert_eq!(
+            app.config.notifications.desktop.backend,
+            crate::config::DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+        );
     }
 
     #[test]

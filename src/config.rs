@@ -19,8 +19,10 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 pub const MIN_NOTIFICATION_ADVANCE_MINUTES: u32 = 1;
 /// Antecedência máxima de notificações: 7 dias.
 pub const MAX_NOTIFICATION_ADVANCE_MINUTES: u32 = 7 * 24 * 60;
-/// Antecedência padrão de notificações: 30 minutos.
-pub const DEFAULT_NOTIFICATION_ADVANCE_MINUTES: u32 = 30;
+/// Antecedência padrão do aviso de evento: 60 minutos.
+pub const DEFAULT_NOTIFICATION_ADVANCE_MINUTES: u32 = 60;
+/// Backend padrão de notificações desktop: seleção automática.
+pub const DEFAULT_DESKTOP_NOTIFICATION_BACKEND: &str = "auto";
 
 /// Preferências gerais do Calma.
 ///
@@ -50,23 +52,47 @@ impl Default for GeneralSettings {
     }
 }
 
+/// Preferências do backend de notificações desktop.
+///
+/// O backend é apenas uma preferência textual. A disponibilidade real do
+/// serviço é detectada em tempo de execução e nunca é persistida.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopNotificationSettings {
+    /// `auto`, `kde`, `freedesktop` ou `noop`.
+    ///
+    /// Valores desconhecidos são aceitos no carregamento e tratados como
+    /// `auto` pela seleção de backend, com diagnóstico na tela de
+    /// configurações.
+    pub backend: String,
+}
+
+impl Default for DesktopNotificationSettings {
+    fn default() -> Self {
+        Self {
+            backend: DEFAULT_DESKTOP_NOTIFICATION_BACKEND.to_string(),
+        }
+    }
+}
+
 /// Preferências do subsistema de notificações.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationSettings {
     /// Habilita notificações da área de trabalho.
     ///
-    /// A entrega real ainda não está implementada; esta opção controla
-    /// apenas a geração/dispatch de notificações pelo daemon.
+    /// A entrega real usa o backend desktop selecionado em tempo de execução.
     pub enabled: bool,
-    /// Notificar sobre prazos de tarefas que estão se aproximando.
+    /// Notificar sobre tarefas com vencimento ou agendamento no dia atual.
     pub upcoming_tasks: bool,
     /// Notificar sobre tarefas atrasadas.
     pub overdue_tasks: bool,
-    /// Notificar sobre eventos que estão se aproximando.
+    /// Notificar sobre eventos do dia e sobre eventos próximos do início.
     pub upcoming_events: bool,
-    /// Quantos minutos antes do prazo/evento a notificação deve ser gerada.
+    /// Quantos minutos antes do início de um evento o aviso deve ser gerado.
     pub advance_minutes: u32,
+    /// Preferências do backend desktop.
+    pub desktop: DesktopNotificationSettings,
 }
 
 impl Default for NotificationSettings {
@@ -77,6 +103,7 @@ impl Default for NotificationSettings {
             overdue_tasks: false,
             upcoming_events: false,
             advance_minutes: DEFAULT_NOTIFICATION_ADVANCE_MINUTES,
+            desktop: DesktopNotificationSettings::default(),
         }
     }
 }
@@ -258,6 +285,14 @@ impl Config {
             self.interface.theme = InterfaceSettings::default().theme;
         }
 
+        if self.notifications.desktop.backend.trim().is_empty() {
+            warnings.push(format!(
+                "O backend de notificações não pode ficar vazio; usando \"{}\".",
+                DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+            ));
+            self.notifications.desktop.backend = DEFAULT_DESKTOP_NOTIFICATION_BACKEND.to_string();
+        }
+
         warnings
     }
 
@@ -391,6 +426,10 @@ mod tests {
             config.notifications.advance_minutes,
             DEFAULT_NOTIFICATION_ADVANCE_MINUTES
         );
+        assert_eq!(
+            config.notifications.desktop.backend,
+            DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+        );
         assert_eq!(config.interface.theme, "dark");
     }
 
@@ -503,7 +542,102 @@ advance_minutes = 999999
             config.notifications.advance_minutes,
             DEFAULT_NOTIFICATION_ADVANCE_MINUTES
         );
+        assert_eq!(
+            config.notifications.desktop.backend,
+            DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+        );
 
+        cleanup(&path);
+    }
+
+    #[test]
+    fn legacy_notification_configuration_still_loads() {
+        let path = temp_config_path("legacy-notifications");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+[notifications]
+enabled = true
+upcoming_tasks = true
+advance_minutes = 42
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path);
+
+        assert!(config.notifications.enabled);
+        assert!(config.notifications.upcoming_tasks);
+        assert_eq!(config.notifications.advance_minutes, 42);
+        assert_eq!(
+            config.notifications.desktop.backend,
+            DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn explicit_desktop_backend_roundtrips() {
+        let path = temp_config_path("desktop-backend");
+        let config = Config {
+            config_path: path.clone(),
+            notifications: NotificationSettings {
+                desktop: DesktopNotificationSettings {
+                    backend: "freedesktop".to_string(),
+                },
+                ..NotificationSettings::default()
+            },
+            ..Config::default()
+        };
+
+        config.save_to(&path).expect("configuração deve ser salva");
+        let loaded = Config::load_from(&path);
+
+        assert_eq!(loaded.notifications.desktop.backend, "freedesktop");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn unknown_backend_is_loaded_and_not_normalized() {
+        let path = temp_config_path("unknown-backend");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+[notifications.desktop]
+backend = "telepathy"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path);
+
+        assert_eq!(config.notifications.desktop.backend, "telepathy");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn empty_backend_is_normalized_to_auto() {
+        let path = temp_config_path("empty-backend");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+[notifications.desktop]
+backend = "   "
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path);
+
+        assert_eq!(
+            config.notifications.desktop.backend,
+            DEFAULT_DESKTOP_NOTIFICATION_BACKEND
+        );
+        assert!(config.load_warning.is_some());
         cleanup(&path);
     }
 }

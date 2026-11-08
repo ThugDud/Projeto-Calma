@@ -429,6 +429,9 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
         KeyCode::Enter | KeyCode::Char(' ') => {
             app.settings_activate_selected();
         }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            app.refresh_desktop_diagnostics();
+        }
         KeyCode::Char('1') => {
             app.current_view = View::Calendario;
         }

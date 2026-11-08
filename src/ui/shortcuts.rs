@@ -54,7 +54,7 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
                 "[n/E] Novo evento | [e] Editar | [d] Excluir | [↑↓/jk] Navegar | [1-4/6] Outras telas | [?] Ajuda | [q] Sair"
             }
             View::Configuracoes => {
-                "[↑↓/jk] Navegar | [Enter/Espaço] Alternar ou editar | [1-5] Outras telas | [Esc] Voltar | [?] Ajuda | [q] Sair"
+                "[↑↓/jk] Navegar | [Enter/Espaço] Alternar ou editar | [r] Atualizar ambiente | [1-5] Outras telas | [Esc] Voltar | [?] Ajuda | [q] Sair"
             }
         },
     };

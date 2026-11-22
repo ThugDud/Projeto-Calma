@@ -6,11 +6,13 @@ use crate::desktop::notifications::DesktopDiagnostics;
 use crate::errors::AppResult;
 use crate::models::event::Event;
 use crate::models::project::Project;
-use crate::models::task::{Task, TaskPriority, TaskStatus};
+use crate::models::task::{Task, TaskPriority, TaskRecurrence, TaskStatus};
+use crate::services::autostart::{AutostartManager, SERVICE_NAME, ServiceSpec};
 use crate::services::date_parser::{
     parse_pt_date, parse_quick_event, parse_quick_task, parse_time,
 };
-use chrono::{Datelike, Duration, NaiveDate};
+use crate::services::portability::{self, ImportMode};
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime};
 use rusqlite::Connection;
 use std::collections::HashSet;
 
@@ -34,16 +36,21 @@ pub struct HierarchyItem {
     pub due_date: Option<NaiveDate>,
     pub priority: Option<TaskPriority>,
     pub progress: Option<(usize, usize)>,
+    pub repeat_label: Option<String>,
+    pub scheduled_time: Option<NaiveTime>,
 }
 
 /// Estado do formulário de edição de tarefa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEditState {
     pub task_id: i64,
-    /// 0 = Título, 1 = Prazo, 2 = Prioridade, 3 = Projeto
+    /// 0 = Título, 1 = Prazo, 2 = Horário, 3 = Repetição, 4 = Dias, 5 = Prioridade, 6 = Projeto
     pub active_field: usize,
     pub title: String,
     pub due_date_str: String,
+    pub time_str: String,
+    pub recurrence: TaskRecurrence,
+    pub recurrence_days: u8,
     pub priority: TaskPriority,
     pub project_id: Option<i64>,
 }
@@ -93,6 +100,19 @@ pub enum InputMode {
         project_id: i64,
         buffer: String,
     },
+    /// Diálogo de exportação com o caminho sugerido/editável.
+    ExportData {
+        buffer: String,
+    },
+    /// Diálogo de importação com o caminho do arquivo JSON.
+    ImportData {
+        buffer: String,
+    },
+    /// Escolha entre adicionar e sobrescrever após informar o caminho.
+    ImportChoice {
+        path: String,
+        selected: ImportMode,
+    },
 }
 
 /// Visualização ativa da aplicação.
@@ -103,7 +123,54 @@ pub enum View {
     Hierarquia,
     VisaoGeral,
     Eventos,
+    Recorrentes,
     Configuracoes,
+}
+
+impl View {
+    /// Seções exibidas no menu, na ordem em que aparecem.
+    ///
+    /// O número é o atalho direto correspondente. Os atalhos 1-6 foram
+    /// preservados; a seção de recorrentes usa o atalho 7.
+    pub const MENU: [(View, &'static str, char); 7] = [
+        (View::Calendario, "Calendário Mensal", '1'),
+        (View::Tarefas, "Lista de Tarefas", '2'),
+        (View::Hierarquia, "Hierarquia de Projetos", '3'),
+        (View::VisaoGeral, "Visão Geral & Prazos", '4'),
+        (View::Eventos, "Agenda de Eventos", '5'),
+        (View::Configuracoes, "Configurações", '6'),
+        (View::Recorrentes, "Tarefas Recorrentes", '7'),
+    ];
+
+    /// Rótulo curto usado no cabeçalho.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Calendario => "Calendário",
+            View::Tarefas => "Tarefas",
+            View::Hierarquia => "Hierarquia",
+            View::VisaoGeral => "Visão Geral",
+            View::Eventos => "Eventos",
+            View::Recorrentes => "Recorrentes",
+            View::Configuracoes => "Configurações",
+        }
+    }
+
+    /// Posição da visualização no menu de seções.
+    pub fn menu_position(self) -> usize {
+        Self::MENU
+            .iter()
+            .position(|(view, _, _)| *view == self)
+            .unwrap_or(0)
+    }
+
+    /// Atalho numérico direto da visualização.
+    pub fn shortcut(self) -> char {
+        Self::MENU
+            .iter()
+            .find(|(view, _, _)| *view == self)
+            .map(|(_, _, key)| *key)
+            .unwrap_or('?')
+    }
 }
 
 /// Seções exibidas na tela de configurações.
@@ -184,7 +251,7 @@ impl SettingId {
     pub fn hint(self) -> &'static str {
         match self {
             SettingId::StartWithSystem => {
-                "A preferência é salva, mas a integração automática com o sistema ainda não está disponível."
+                "Cria e habilita automaticamente um serviço systemd de usuário (calma-daemon.service), sem edição manual de arquivos."
             }
             SettingId::BackgroundMonitoring => {
                 "Permite que o daemon verifique prazos e eventos periodicamente."
@@ -354,6 +421,8 @@ pub struct App {
     pub projects: Vec<Project>,
     /// Eventos carregados do SQLite.
     pub events: Vec<Event>,
+    /// Conclusões de ocorrências de tarefas recorrentes (tarefa, data).
+    pub task_completions: HashSet<(i64, NaiveDate)>,
     /// Índice do item selecionado na visualização ativa de tarefas.
     pub selected_index: usize,
     /// Índice do item selecionado na visualização hierárquica.
@@ -370,6 +439,16 @@ pub struct App {
     pub expanded_tasks: HashSet<i64>,
     /// Se o modal de ajuda está visível.
     pub show_help: bool,
+    /// Deslocamento vertical do conteúdo rolável da ajuda.
+    pub help_scroll: u16,
+    /// Se o menu de seleção de seções está aberto.
+    pub show_view_menu: bool,
+    /// Posição selecionada no menu de seções.
+    pub view_menu_idx: usize,
+    /// Coluna selecionada na seção de tarefas recorrentes (0 = segunda).
+    pub recurring_selected_day: usize,
+    /// Tarefa selecionada dentro da coluna de recorrentes.
+    pub recurring_selected_idx: usize,
     /// Se a aplicação deve continuar rodando.
     pub running: bool,
     /// Visualização ativa.
@@ -392,6 +471,13 @@ pub struct App {
     pub desktop: DesktopDiagnostics,
     /// Estado de navegação/edição da tela de configurações.
     pub settings: SettingsState,
+    /// Gerenciador de inicialização automática do daemon.
+    ///
+    /// O backend padrão é o systemd de usuário; novos backends podem ser
+    /// registrados sem alterar a TUI.
+    pub autostart: AutostartManager,
+    /// Aviso transitório exibido no cabeçalho (resultado de backup, etc.).
+    pub notice: Option<String>,
 }
 
 impl App {
@@ -411,6 +497,7 @@ impl App {
             tasks: Vec::new(),
             projects: Vec::new(),
             events: Vec::new(),
+            task_completions: HashSet::new(),
             selected_index: 0,
             hierarchy_selected_idx: 0,
             selected_event_index: 0,
@@ -419,6 +506,11 @@ impl App {
             expanded_projects: HashSet::new(),
             expanded_tasks: HashSet::new(),
             show_help: false,
+            help_scroll: 0,
+            show_view_menu: false,
+            view_menu_idx: 0,
+            recurring_selected_day: today.weekday().num_days_from_monday() as usize,
+            recurring_selected_idx: 0,
             running: true,
             current_view: View::Calendario,
             input_mode: InputMode::Normal,
@@ -429,6 +521,8 @@ impl App {
             config,
             desktop,
             settings: SettingsState::default(),
+            autostart: AutostartManager::default(),
+            notice: None,
         }
     }
 
@@ -445,6 +539,9 @@ impl App {
         self.tasks = crate::db::list_tasks(conn)?;
         self.projects = crate::db::list_projects(conn)?;
         self.events = crate::db::list_events(conn)?;
+        self.task_completions = crate::db::list_task_completions(conn)?
+            .into_iter()
+            .collect();
 
         // Ajusta selected_index da lista plana de tarefas
         if self.tasks.is_empty() {
@@ -485,6 +582,16 @@ impl App {
             self.overview_selected_idx = overview_len - 1;
         }
 
+        // Ajusta a seleção da seção de tarefas recorrentes
+        let recurring_len = self
+            .recurring_tasks_for_day(self.recurring_selected_date())
+            .len();
+        if recurring_len == 0 {
+            self.recurring_selected_idx = 0;
+        } else if self.recurring_selected_idx >= recurring_len {
+            self.recurring_selected_idx = recurring_len - 1;
+        }
+
         Ok(())
     }
 
@@ -492,12 +599,117 @@ impl App {
     // SELEÇÃO CONTEXTUAL (CALENDÁRIO, DASHBOARD E EVENTOS)
     // ==========================================
 
-    /// Retorna as tarefas com vencimento ou agendamento no dia informado.
+    /// Indica se a tarefa aparece em uma data.
+    ///
+    /// Tarefas recorrentes seguem sua regra; tarefas únicas usam vencimento
+    /// ou agendamento.
+    pub fn task_occurs_on(&self, task: &Task, day: NaiveDate) -> bool {
+        if task.is_recurring() {
+            task.occurs_on(day)
+        } else {
+            task.due_date == Some(day) || task.scheduled_date == Some(day)
+        }
+    }
+
+    /// Indica se a ocorrência da tarefa na data está concluída.
+    pub fn task_completed_on(&self, task: &Task, day: NaiveDate) -> bool {
+        if task.is_recurring() {
+            self.task_completions.contains(&(task.id, day))
+        } else {
+            task.status == TaskStatus::Concluida
+        }
+    }
+
+    /// Status efetivo da tarefa em uma data.
+    pub fn task_status_on(&self, task: &Task, day: NaiveDate) -> TaskStatus {
+        if task.is_recurring() {
+            if self.task_completed_on(task, day) {
+                TaskStatus::Concluida
+            } else {
+                TaskStatus::Pendente
+            }
+        } else {
+            task.status
+        }
+    }
+
+    /// Retorna as tarefas não recorrentes com vencimento ou agendamento no dia.
+    ///
+    /// Tarefas recorrentes não aparecem no calendário; elas têm uma seção
+    /// própria organizada por dia da semana.
     pub fn tasks_for_day(&self, day: NaiveDate) -> Vec<&Task> {
         self.tasks
             .iter()
-            .filter(|t| t.due_date == Some(day) || t.scheduled_date == Some(day))
+            .filter(|t| !t.is_recurring() && self.task_occurs_on(t, day))
             .collect()
+    }
+
+    /// Datas da semana atual, de segunda a domingo.
+    pub fn recurring_week_dates(&self) -> [NaiveDate; 7] {
+        let monday =
+            self.today - Duration::days(self.today.weekday().num_days_from_monday() as i64);
+        std::array::from_fn(|i| monday + Duration::days(i as i64))
+    }
+
+    /// Tarefas recorrentes que ocorrem em um dia, ordenadas por horário e título.
+    pub fn recurring_tasks_for_day(&self, day: NaiveDate) -> Vec<&Task> {
+        let mut tasks: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.is_recurring() && t.occurs_on(day))
+            .collect();
+        tasks.sort_by(|a, b| match (a.scheduled_time, b.scheduled_time) {
+            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.title.cmp(&b.title)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.title.cmp(&b.title),
+        });
+        tasks
+    }
+
+    /// Data correspondente à coluna selecionada na seção de recorrentes.
+    pub fn recurring_selected_date(&self) -> NaiveDate {
+        let day = self.recurring_selected_day.min(6);
+        self.recurring_week_dates()[day]
+    }
+
+    /// Move a seleção para a coluna anterior (segunda → domingo).
+    pub fn recurring_previous_day(&mut self) {
+        self.recurring_selected_day = if self.recurring_selected_day == 0 {
+            6
+        } else {
+            self.recurring_selected_day - 1
+        };
+        self.recurring_selected_idx = 0;
+    }
+
+    /// Move a seleção para a próxima coluna (domingo → segunda).
+    pub fn recurring_next_day(&mut self) {
+        self.recurring_selected_day = (self.recurring_selected_day + 1) % 7;
+        self.recurring_selected_idx = 0;
+    }
+
+    /// Volta a seleção para o dia da semana atual.
+    pub fn recurring_go_to_today(&mut self) {
+        self.recurring_selected_day = self.today.weekday().num_days_from_monday() as usize;
+        self.recurring_selected_idx = 0;
+    }
+
+    /// Seleciona a tarefa recorrente atualmente destacada.
+    pub fn selected_recurring_task(&self) -> Option<&Task> {
+        let day = self.recurring_selected_date();
+        self.recurring_tasks_for_day(day)
+            .get(self.recurring_selected_idx)
+            .copied()
+    }
+
+    /// Troca de seção, tratando a tela de configurações de forma especial.
+    pub fn switch_view(&mut self, view: View) {
+        if view == View::Configuracoes {
+            self.open_settings();
+        } else {
+            self.current_view = view;
+        }
     }
 
     /// Retorna a tarefa selecionada no painel lateral do calendário.
@@ -514,7 +726,9 @@ impl App {
             .tasks
             .iter()
             .filter(|t| {
-                t.status != TaskStatus::Concluida && t.due_date.is_some_and(|d| d < self.today)
+                !t.is_recurring()
+                    && t.status != TaskStatus::Concluida
+                    && t.due_date.is_some_and(|d| d < self.today)
             })
             .collect();
         overdue.sort_by_key(|t| t.due_date);
@@ -522,16 +736,19 @@ impl App {
         let mut today: Vec<&Task> = self
             .tasks
             .iter()
-            .filter(|t| t.status != TaskStatus::Concluida && t.due_date == Some(self.today))
+            .filter(|t| {
+                self.task_occurs_on(t, self.today) && !self.task_completed_on(t, self.today)
+            })
             .collect();
-        today.sort_by_key(|a| a.title.to_lowercase());
+        today.sort_by_key(|t| (t.scheduled_time, t.title.to_lowercase()));
 
         let next_week = self.today + Duration::days(7);
         let mut upcoming: Vec<&Task> = self
             .tasks
             .iter()
             .filter(|t| {
-                t.status != TaskStatus::Concluida
+                !t.is_recurring()
+                    && t.status != TaskStatus::Concluida
                     && t.due_date.is_some_and(|d| d > self.today && d <= next_week)
             })
             .collect();
@@ -540,7 +757,9 @@ impl App {
         let mut no_date: Vec<&Task> = self
             .tasks
             .iter()
-            .filter(|t| t.status != TaskStatus::Concluida && t.due_date.is_none())
+            .filter(|t| {
+                !t.is_recurring() && t.status != TaskStatus::Concluida && t.due_date.is_none()
+            })
             .collect();
         no_date.sort_by_key(|a| a.title.to_lowercase());
 
@@ -596,6 +815,7 @@ impl App {
             },
             View::Calendario => self.selected_calendar_task(),
             View::VisaoGeral => self.selected_overview_task(),
+            View::Recorrentes => self.selected_recurring_task(),
             View::Eventos | View::Configuracoes => None,
         }
     }
@@ -663,6 +883,8 @@ impl App {
             due_date: None,
             priority: None,
             progress: Some(progress),
+            repeat_label: None,
+            scheduled_time: None,
         });
 
         if is_expanded {
@@ -699,10 +921,12 @@ impl App {
             is_project: false,
             has_children,
             is_expanded,
-            status: Some(task.status),
+            status: Some(self.task_status_on(task, self.today)),
             due_date: task.due_date,
             priority: Some(task.priority),
             progress,
+            repeat_label: task.recurrence_label(),
+            scheduled_time: task.scheduled_time,
         });
 
         if is_expanded {
@@ -738,7 +962,7 @@ impl App {
         let total = tasks_in_projects.len();
         let completed = tasks_in_projects
             .iter()
-            .filter(|t| t.status == TaskStatus::Concluida)
+            .filter(|t| self.task_status_on(t, self.today) == TaskStatus::Concluida)
             .count();
         (completed, total)
     }
@@ -759,7 +983,10 @@ impl App {
         let completed = self
             .tasks
             .iter()
-            .filter(|t| all_subtask_ids.contains(&t.id) && t.status == TaskStatus::Concluida)
+            .filter(|t| {
+                all_subtask_ids.contains(&t.id)
+                    && self.task_status_on(t, self.today) == TaskStatus::Concluida
+            })
             .count();
         (completed, total)
     }
@@ -822,7 +1049,7 @@ impl App {
                     };
                 }
             }
-            View::Tarefas | View::Calendario | View::VisaoGeral => {
+            View::Tarefas | View::Calendario | View::VisaoGeral | View::Recorrentes => {
                 if let Some((id, title)) = self.selected_task().map(|t| (t.id, t.title.clone())) {
                     self.input_mode = InputMode::ConfirmDelete {
                         target: DeleteTarget::Task,
@@ -905,7 +1132,7 @@ impl App {
                     }
                 }
             }
-            View::Tarefas | View::Calendario | View::VisaoGeral => {
+            View::Tarefas | View::Calendario | View::VisaoGeral | View::Recorrentes => {
                 let state = self.selected_task().map(task_to_edit_state);
                 if let Some(state) = state {
                     self.input_mode = InputMode::EditTask(state);
@@ -919,18 +1146,55 @@ impl App {
     pub fn save_edit_task(&mut self, conn: &Connection) -> AppResult<()> {
         if let InputMode::EditTask(edit) = &self.input_mode {
             let edit = edit.clone();
+
+            if edit.recurrence == TaskRecurrence::Weekly && edit.recurrence_days == 0 {
+                self.notice = Some(
+                    "Selecione ao menos um dia da semana para a repetição semanal.".to_string(),
+                );
+                return Ok(());
+            }
+
+            let scheduled_time = match edit.time_str.trim() {
+                "" => None,
+                value => match parse_time(value) {
+                    Some(time) => Some(time),
+                    None => {
+                        self.notice =
+                            Some("Horário inválido. Use HH:MM ou HHh (ex: 09:30).".to_string());
+                        return Ok(());
+                    }
+                },
+            };
+
             if let Some(mut task) = self.tasks.iter().find(|t| t.id == edit.task_id).cloned() {
                 task.title = edit.title.trim().to_string();
-                if !edit.due_date_str.trim().is_empty() {
+                task.scheduled_time = scheduled_time;
+                task.recurrence = edit.recurrence;
+                task.recurrence_days = if edit.recurrence == TaskRecurrence::Weekly {
+                    edit.recurrence_days
+                } else {
+                    0
+                };
+
+                if task.is_recurring() {
+                    // A recorrência substitui o prazo único; a ocorrência é
+                    // derivada da regra e o status global fica neutro.
+                    task.due_date = None;
+                    task.scheduled_date = None;
+                    task.status = TaskStatus::Pendente;
+                    task.completed_at = None;
+                } else if !edit.due_date_str.trim().is_empty() {
                     task.due_date = parse_pt_date(&edit.due_date_str, self.today);
                 } else {
                     task.due_date = None;
                 }
+
                 task.priority = edit.priority;
                 task.project_id = edit.project_id;
 
                 crate::db::update_task(conn, &task)?;
                 self.input_mode = InputMode::Normal;
+                self.notice = None;
                 self.reload(conn)?;
             }
         }
@@ -983,6 +1247,118 @@ impl App {
         Ok(())
     }
 
+    // ==========================================
+    // EXPORTAÇÃO E IMPORTAÇÃO DE DADOS
+    // ==========================================
+
+    /// Abre o diálogo de exportação com o caminho padrão sugerido.
+    pub fn start_export(&mut self) {
+        self.notice = None;
+        self.input_mode = InputMode::ExportData {
+            buffer: portability::default_export_path()
+                .to_string_lossy()
+                .into_owned(),
+        };
+    }
+
+    /// Abre o diálogo de importação com o campo de caminho vazio.
+    pub fn start_import(&mut self) {
+        self.notice = None;
+        self.input_mode = InputMode::ImportData {
+            buffer: String::new(),
+        };
+    }
+
+    /// Confirma o caminho digitado e avança para a escolha do modo.
+    pub fn start_import_choice(&mut self) {
+        if let InputMode::ImportData { buffer } = &self.input_mode {
+            let path = buffer.trim().to_string();
+            if path.is_empty() {
+                self.notice = Some("Informe o caminho de um arquivo JSON para importar.".into());
+                return;
+            }
+            // O modo não destrutivo é o padrão para evitar perda acidental.
+            self.input_mode = InputMode::ImportChoice {
+                path,
+                selected: ImportMode::Add,
+            };
+        }
+    }
+
+    /// Exporta os dados atuais para o caminho informado no diálogo.
+    ///
+    /// Falhas são exibidas como aviso no cabeçalho, sem encerrar a TUI.
+    pub fn export_data(&mut self, conn: &Connection) {
+        let buffer = match &self.input_mode {
+            InputMode::ExportData { buffer } => buffer.clone(),
+            _ => return,
+        };
+
+        let result = portability::resolve_user_path(&buffer)
+            .and_then(|path| portability::export_to_file(&path, conn));
+
+        self.input_mode = InputMode::Normal;
+        match result {
+            Ok(summary) => {
+                self.notice = Some(format!(
+                    "Backup exportado para {} ({} projetos, {} tarefas, {} eventos).",
+                    summary.path.display(),
+                    summary.projects,
+                    summary.tasks,
+                    summary.events
+                ));
+            }
+            Err(err) => {
+                self.notice = Some(format!("Falha ao exportar: {}", err));
+            }
+        }
+    }
+
+    /// Importa o arquivo escolhido aplicando o modo selecionado.
+    ///
+    /// A recarga sempre acontece após uma importação bem-sucedida. Erros de
+    /// leitura, validação ou escrita são exibidos como aviso no cabeçalho.
+    pub fn import_data(&mut self, conn: &Connection) {
+        let (path, mode) = match &self.input_mode {
+            InputMode::ImportChoice { path, selected } => (path.clone(), *selected),
+            _ => return,
+        };
+
+        let result = portability::resolve_user_path(&path)
+            .and_then(|path| portability::import_from_file(&path, conn, mode));
+
+        self.input_mode = InputMode::Normal;
+        match result {
+            Ok(summary) => {
+                let mut message = format!(
+                    "{} concluída: {} projetos, {} tarefas e {} eventos importados",
+                    mode.label(),
+                    summary.projects,
+                    summary.tasks,
+                    summary.events
+                );
+                if summary.duplicates_skipped > 0 {
+                    message.push_str(&format!(
+                        "; {} duplicata(s) ignorada(s)",
+                        summary.duplicates_skipped
+                    ));
+                }
+                message.push('.');
+                self.notice = Some(message);
+
+                if let Err(err) = self.reload(conn) {
+                    self.notice = Some(format!(
+                        "Importação aplicada, mas a recarga falhou: {}",
+                        err
+                    ));
+                }
+            }
+            Err(err) => {
+                self.notice = Some(format!("Falha ao importar: {}", err));
+            }
+        }
+    }
+
     /// Inicia o diálogo de criação de uma subtarefa para o item atual.
     pub fn start_new_subtask(&mut self) {
         if let Some(item) = self.get_selected_hierarchy_item() {
@@ -1018,6 +1394,9 @@ impl App {
                 task.parent_id = Some(pid);
                 task.project_id = parent_proj_id;
                 task.due_date = parsed.due_date;
+                task.scheduled_time = parsed.scheduled_time;
+                task.recurrence = parsed.recurrence;
+                task.recurrence_days = parsed.recurrence_days;
 
                 crate::db::insert_task(conn, &task)?;
                 self.expanded_tasks.insert(pid);
@@ -1089,6 +1468,9 @@ impl App {
         let parsed = parse_quick_task(input, self.today);
         let mut task = Task::new(parsed.title);
         task.due_date = parsed.due_date;
+        task.scheduled_time = parsed.scheduled_time;
+        task.recurrence = parsed.recurrence;
+        task.recurrence_days = parsed.recurrence_days;
 
         // Se estivermos em um projeto na hierarquia, vincula a ele
         if self.current_view == View::Hierarquia {
@@ -1152,16 +1534,34 @@ impl App {
     }
 
     /// Alterna a conclusão da tarefa atualmente selecionada.
+    ///
+    /// Tarefas recorrentes registram a conclusão apenas para a data da
+    /// ocorrência exibida, sem desativar a repetição.
     pub fn toggle_selected_task(&mut self, conn: &Connection) -> AppResult<()> {
-        if let Some(task_id) = self.selected_task().map(|t| t.id) {
-            let is_completed = self
-                .tasks
-                .iter()
-                .find(|t| t.id == task_id)
-                .is_some_and(|t| t.status == TaskStatus::Concluida);
+        let context = self.selected_task().map(|task| {
+            (
+                task.id,
+                task.is_recurring(),
+                task.status == TaskStatus::Concluida,
+            )
+        });
+        let Some((task_id, is_recurring, is_completed)) = context else {
+            return Ok(());
+        };
+
+        if is_recurring {
+            let day = match self.current_view {
+                View::Calendario => self.selected_day.unwrap_or(self.today),
+                View::Recorrentes => self.recurring_selected_date(),
+                _ => self.today,
+            };
+            let completed = self.task_completions.contains(&(task_id, day));
+            crate::db::set_task_completed_on(conn, task_id, day, !completed)?;
+        } else {
             crate::db::mark_task_completed(conn, task_id, !is_completed)?;
-            self.reload(conn)?;
         }
+
+        self.reload(conn)?;
         Ok(())
     }
 
@@ -1172,6 +1572,7 @@ impl App {
         self.calendar_month = self.today.month();
         self.selected_day = Some(self.today);
         self.calendar_selected_task_idx = 0;
+        self.recurring_go_to_today();
     }
 
     /// Seleciona o item anterior na lista ativa.
@@ -1195,6 +1596,11 @@ impl App {
             View::VisaoGeral => {
                 if self.overview_selected_idx > 0 {
                     self.overview_selected_idx -= 1;
+                }
+            }
+            View::Recorrentes => {
+                if self.recurring_selected_idx > 0 {
+                    self.recurring_selected_idx -= 1;
                 }
             }
             View::Tarefas => {
@@ -1225,6 +1631,13 @@ impl App {
             View::VisaoGeral => {
                 let max = self.overview_flat_len().saturating_sub(1);
                 self.overview_selected_idx = (self.overview_selected_idx + 1).min(max);
+            }
+            View::Recorrentes => {
+                let max = self
+                    .recurring_tasks_for_day(self.recurring_selected_date())
+                    .len()
+                    .saturating_sub(1);
+                self.recurring_selected_idx = (self.recurring_selected_idx + 1).min(max);
             }
             View::Tarefas => {
                 let max = self.tasks.len().saturating_sub(1);
@@ -1332,8 +1745,83 @@ impl App {
             return;
         }
 
+        if setting == SettingId::StartWithSystem {
+            self.toggle_start_with_system();
+            return;
+        }
+
         setting.toggle(&mut self.config);
         self.persist_settings();
+    }
+
+    /// Habilita ou desabilita a inicialização automática junto ao gerenciador
+    /// de serviços disponível.
+    ///
+    /// O serviço é criado/removido automaticamente. Se a operação falhar, a
+    /// preferência é revertida para permanecer consistente com o sistema.
+    fn toggle_start_with_system(&mut self) {
+        self.settings.feedback = None;
+        let enabling = !self.config.general.start_with_system;
+        let previous_monitoring = self.config.general.background_monitoring;
+        let monitoring_auto_enabled = !previous_monitoring;
+
+        // Ajusta a preferência em memória antes de iniciar o serviço, para que
+        // o daemon já leia o monitoramento ativado quando for iniciado agora.
+        self.config.general.start_with_system = enabling;
+        if enabling && !self.config.general.background_monitoring {
+            self.config.general.background_monitoring = true;
+        }
+
+        if let Err(err) = self.config.save() {
+            self.config.general.start_with_system = !enabling;
+            self.config.general.background_monitoring = previous_monitoring;
+            self.settings.feedback = Some(format!(
+                "Não foi possível salvar a preferência de inicialização: {}",
+                err
+            ));
+            return;
+        }
+
+        let result = if enabling {
+            ServiceSpec::current_daemon().and_then(|spec| self.autostart.enable(&spec))
+        } else {
+            self.autostart.disable()
+        };
+
+        match result {
+            Ok(backend) => {
+                let action = if enabling {
+                    "habilitado"
+                } else {
+                    "desabilitado"
+                };
+                let mut message = format!(
+                    "Serviço {} {} para {}.",
+                    SERVICE_NAME,
+                    action,
+                    backend.label()
+                );
+                if enabling && monitoring_auto_enabled {
+                    message.push_str(" O monitoramento em segundo plano também foi ativado.");
+                }
+                message.push_str(&format!(
+                    " Configurações salvas em {}",
+                    self.config.config_path.display()
+                ));
+                self.settings.feedback = Some(message);
+            }
+            Err(err) => {
+                // Reverte a configuração para refletir o estado real do serviço.
+                self.config.general.start_with_system = !enabling;
+                self.config.general.background_monitoring = previous_monitoring;
+                let _ = self.config.save();
+                self.settings.feedback = Some(format!(
+                    "Não foi possível {} a inicialização automática: {}",
+                    if enabling { "habilitar" } else { "desabilitar" },
+                    err
+                ));
+            }
+        }
     }
 
     /// Cancela a edição de um valor numérico.
@@ -1422,6 +1910,12 @@ fn task_to_edit_state(task: &Task) -> TaskEditState {
             .due_date
             .map(|d| d.format("%d/%m/%Y").to_string())
             .unwrap_or_default(),
+        time_str: task
+            .scheduled_time
+            .map(|t| t.format("%H:%M").to_string())
+            .unwrap_or_default(),
+        recurrence: task.recurrence,
+        recurrence_days: task.recurrence_days,
         priority: task.priority,
         project_id: task.project_id,
     }
@@ -1436,6 +1930,53 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::AppError;
+    use crate::services::autostart::{
+        AutostartManager, ServiceBackend, ServiceBackendKind, ServiceSpec,
+    };
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct OkBackend;
+
+    impl ServiceBackend for OkBackend {
+        fn kind(&self) -> ServiceBackendKind {
+            ServiceBackendKind::SystemdUser
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn enable(&self, _spec: &ServiceSpec) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn disable(&self) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailBackend;
+
+    impl ServiceBackend for FailBackend {
+        fn kind(&self) -> ServiceBackendKind {
+            ServiceBackendKind::SystemdUser
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn enable(&self, _spec: &ServiceSpec) -> AppResult<()> {
+            Err(AppError::Service("systemctl --user indisponível".into()))
+        }
+
+        fn disable(&self) -> AppResult<()> {
+            Err(AppError::Service("systemctl --user indisponível".into()))
+        }
+    }
 
     #[test]
     fn test_recursive_hierarchy_faculdade_calculo_lista3_questao1() {
@@ -1576,6 +2117,7 @@ mod tests {
             ..Config::default()
         };
         let mut app = App::with_config(config);
+        app.autostart = AutostartManager::with_backends(vec![Arc::new(OkBackend)]);
 
         app.open_settings();
         assert_eq!(app.current_view, View::Configuracoes);
@@ -1583,13 +2125,50 @@ mod tests {
 
         app.settings_activate_selected();
         assert!(app.config.general.start_with_system);
+        assert!(app.config.general.background_monitoring);
         assert!(app.settings.feedback.is_some());
 
         let reloaded = Config::load_from(&path);
         assert!(reloaded.general.start_with_system);
+        assert!(reloaded.general.background_monitoring);
+
+        app.settings_activate_selected();
+        assert!(!app.config.general.start_with_system);
+        assert!(app.config.general.background_monitoring);
+
+        let reloaded = Config::load_from(&path);
+        assert!(!reloaded.general.start_with_system);
 
         app.close_settings();
         assert_eq!(app.current_view, View::Calendario);
+
+        cleanup_config(&path);
+    }
+
+    #[test]
+    fn failed_autostart_keeps_preference_unchanged() {
+        let path = temp_config_path("app-autostart-failure");
+        let config = Config {
+            config_path: path.clone(),
+            ..Config::default()
+        };
+        let mut app = App::with_config(config);
+        app.autostart = AutostartManager::with_backends(vec![Arc::new(FailBackend)]);
+
+        app.open_settings();
+        app.settings_activate_selected();
+
+        assert!(!app.config.general.start_with_system);
+        assert!(!app.config.general.background_monitoring);
+        assert!(
+            app.settings
+                .feedback
+                .as_deref()
+                .is_some_and(|message| message.contains("Não foi possível habilitar"))
+        );
+
+        let reloaded = Config::load_from(&path);
+        assert!(!reloaded.general.start_with_system);
 
         cleanup_config(&path);
     }
@@ -1648,6 +2227,272 @@ mod tests {
         assert_eq!(reloaded.general.poll_interval_secs, 120);
 
         cleanup_config(&path);
+    }
+
+    #[test]
+    fn test_backup_input_modes_and_default_non_destructive_choice() {
+        let mut app = App::new();
+
+        app.start_export();
+        match &app.input_mode {
+            InputMode::ExportData { buffer } => {
+                assert!(buffer.ends_with(".json"));
+                assert!(!buffer.is_empty());
+            }
+            other => panic!("modo inesperado: {:?}", other),
+        }
+
+        app.start_import();
+        assert_eq!(
+            app.input_mode,
+            InputMode::ImportData {
+                buffer: String::new()
+            }
+        );
+
+        // Caminho vazio não avança e informa o usuário.
+        app.start_import_choice();
+        assert!(matches!(app.input_mode, InputMode::ImportData { .. }));
+        assert!(app.notice.is_some());
+
+        app.input_mode = InputMode::ImportData {
+            buffer: "~/backup.json".into(),
+        };
+        app.start_import_choice();
+        assert_eq!(
+            app.input_mode,
+            InputMode::ImportChoice {
+                path: "~/backup.json".into(),
+                selected: ImportMode::Add,
+            }
+        );
+    }
+
+    #[test]
+    fn test_app_export_and_add_import_roundtrip() {
+        let config_path = temp_config_path("app-backup");
+        let path = config_path
+            .parent()
+            .expect("diretório temporário")
+            .join("backup.json");
+        let conn = crate::db::init_memory().expect("banco em memória");
+
+        let project_id =
+            crate::db::insert_project(&conn, &Project::new("Pessoal".into())).expect("projeto");
+        let mut task = Task::new("Comprar pão".into());
+        task.project_id = Some(project_id);
+        crate::db::insert_task(&conn, &task).expect("tarefa");
+
+        let mut app = App::new();
+        app.reload(&conn).expect("recarregar");
+        assert_eq!(app.tasks.len(), 1);
+
+        app.start_export();
+        app.input_mode = InputMode::ExportData {
+            buffer: path.to_string_lossy().into_owned(),
+        };
+        app.export_data(&conn);
+
+        assert!(path.exists());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("exportado"))
+        );
+
+        // Importar e adicionar no mesmo banco não cria duplicatas.
+        app.input_mode = InputMode::ImportChoice {
+            path: path.to_string_lossy().into_owned(),
+            selected: ImportMode::Add,
+        };
+        app.import_data(&conn);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.projects.len(), 1);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("duplicata"))
+        );
+
+        let _ = std::fs::remove_file(&path);
+        cleanup_config(&config_path);
+    }
+
+    #[test]
+    fn recurring_task_completion_is_tracked_per_occurrence() {
+        let mut app = App::new();
+        let today = app.today;
+
+        let mut daily = Task::new("Academia".into());
+        daily.id = 1;
+        daily.recurrence = TaskRecurrence::Daily;
+        daily.scheduled_time = Some(NaiveTime::from_hms_opt(7, 0, 0).unwrap());
+        app.tasks.push(daily);
+
+        assert!(app.task_occurs_on(&app.tasks[0], today));
+        assert!(!app.task_completed_on(&app.tasks[0], today));
+        assert_eq!(
+            app.task_status_on(&app.tasks[0], today),
+            TaskStatus::Pendente
+        );
+        assert_eq!(app.overview_lists().today.len(), 1);
+
+        app.task_completions.insert((1, today));
+
+        assert!(app.task_completed_on(&app.tasks[0], today));
+        assert_eq!(
+            app.task_status_on(&app.tasks[0], today),
+            TaskStatus::Concluida
+        );
+        assert!(app.overview_lists().today.is_empty());
+        assert!(
+            app.overview_lists().no_date.is_empty(),
+            "tarefas recorrentes não entram na lista sem data"
+        );
+    }
+
+    #[test]
+    fn weekly_task_occurs_only_on_selected_days() {
+        let mut app = App::new();
+
+        let mut weekly = Task::new("Revisão".into());
+        weekly.id = 2;
+        weekly.recurrence = TaskRecurrence::Weekly;
+        weekly.recurrence_days = 0b000_0001; // Segunda
+        app.tasks.push(weekly);
+
+        let monday = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        assert!(app.task_occurs_on(&app.tasks[0], monday));
+        assert!(!app.task_occurs_on(&app.tasks[0], monday + Duration::days(1)));
+        assert!(!app.task_occurs_on(&app.tasks[0], monday + Duration::days(2)));
+    }
+
+    #[test]
+    fn saving_recurring_task_clears_due_date_and_requires_weekly_days() {
+        let conn = crate::db::init_memory().expect("banco em memória");
+        let mut task = Task::new("Academia".into());
+        task.due_date = Some(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap());
+        let task_id = crate::db::insert_task(&conn, &task).expect("inserir tarefa");
+
+        let mut app = App::new();
+        app.reload(&conn).expect("recarregar");
+
+        app.input_mode = InputMode::EditTask(TaskEditState {
+            task_id,
+            active_field: 0,
+            title: "Academia".into(),
+            due_date_str: "09/11/2026".into(),
+            time_str: "7h".into(),
+            recurrence: TaskRecurrence::Weekly,
+            recurrence_days: 0,
+            priority: TaskPriority::Normal,
+            project_id: None,
+        });
+
+        app.save_edit_task(&conn).expect("salvar sem dias");
+        assert!(matches!(app.input_mode, InputMode::EditTask(_)));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("dia da semana"))
+        );
+        let stored = crate::db::list_tasks(&conn).unwrap();
+        assert_eq!(
+            stored[0].due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap())
+        );
+        assert!(!stored[0].is_recurring());
+
+        if let InputMode::EditTask(edit) = &mut app.input_mode {
+            edit.recurrence_days = 0b001_0101;
+        }
+        app.save_edit_task(&conn).expect("salvar recorrente");
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        let stored = crate::db::list_tasks(&conn).unwrap();
+        assert_eq!(stored[0].recurrence, TaskRecurrence::Weekly);
+        assert_eq!(stored[0].recurrence_days, 0b001_0101);
+        assert_eq!(stored[0].due_date, None);
+        assert_eq!(
+            stored[0].scheduled_time,
+            Some(NaiveTime::from_hms_opt(7, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn view_menu_lists_all_sections_with_unique_shortcuts() {
+        assert_eq!(View::MENU.len(), 7);
+        let mut keys: Vec<char> = View::MENU.iter().map(|(_, _, key)| *key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), View::MENU.len());
+        for (view, _, key) in View::MENU.iter() {
+            assert_eq!(view.shortcut(), *key);
+            assert_eq!(View::MENU[view.menu_position()].0, *view);
+        }
+    }
+
+    #[test]
+    fn recurring_week_starts_on_monday_and_contains_today() {
+        let mut app = App::new();
+        app.today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(); // quarta-feira
+
+        let dates = app.recurring_week_dates();
+        assert_eq!(dates[0], NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        assert_eq!(dates[6], NaiveDate::from_ymd_opt(2026, 11, 22).unwrap());
+        assert_eq!(dates[2], app.today);
+    }
+
+    #[test]
+    fn recurring_tasks_are_grouped_by_weekday() {
+        let mut app = App::new();
+        app.today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(); // quarta-feira
+
+        let mut daily = Task::new("Academia".into());
+        daily.recurrence = TaskRecurrence::Daily;
+        app.tasks.push(daily);
+
+        let mut weekly = Task::new("Revisão".into());
+        weekly.recurrence = TaskRecurrence::Weekly;
+        weekly.recurrence_days = crate::models::task::weekday_bit(chrono::Weekday::Mon)
+            | crate::models::task::weekday_bit(chrono::Weekday::Wed)
+            | crate::models::task::weekday_bit(chrono::Weekday::Fri);
+        app.tasks.push(weekly);
+
+        let dates = app.recurring_week_dates();
+        let monday: Vec<&str> = app
+            .recurring_tasks_for_day(dates[0])
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        let tuesday = app.recurring_tasks_for_day(dates[1]);
+        let wednesday = app.recurring_tasks_for_day(dates[2]);
+
+        assert_eq!(monday.len(), 2);
+        assert_eq!(tuesday.len(), 1);
+        assert_eq!(tuesday[0].title, "Academia");
+        assert_eq!(wednesday.len(), 2);
+    }
+
+    #[test]
+    fn calendar_day_tasks_exclude_recurring_tasks() {
+        let mut app = App::new();
+        app.today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+
+        let mut recurring = Task::new("Academia".into());
+        recurring.recurrence = TaskRecurrence::Daily;
+        app.tasks.push(recurring);
+
+        let mut single = Task::new("Prova".into());
+        single.due_date = Some(app.today);
+        app.tasks.push(single);
+
+        let day_tasks = app.tasks_for_day(app.today);
+        assert_eq!(day_tasks.len(), 1);
+        assert_eq!(day_tasks[0].title, "Prova");
     }
 
     fn temp_config_path(name: &str) -> std::path::PathBuf {

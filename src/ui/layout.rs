@@ -5,6 +5,7 @@ use crate::ui::header;
 use crate::ui::hierarchy;
 use crate::ui::modal;
 use crate::ui::overview;
+use crate::ui::recurring;
 use crate::ui::settings;
 use crate::ui::shortcuts;
 use crate::ui::tasks;
@@ -44,6 +45,9 @@ pub fn render(f: &mut Frame, app: &App) {
         }
         View::Eventos => {
             events::render(f, chunks[1], theme, app);
+        }
+        View::Recorrentes => {
+            recurring::render(f, chunks[1], theme, app);
         }
         View::Configuracoes => {
             settings::render(f, chunks[1], theme, app);
@@ -85,9 +89,20 @@ pub fn render(f: &mut Frame, app: &App) {
         } => {
             modal::render_new_subtask(f, f.area(), theme, app, parent_task_title, buffer);
         }
+        InputMode::ExportData { buffer } => {
+            modal::render_export_modal(f, f.area(), theme, app, buffer);
+        }
+        InputMode::ImportData { buffer } => {
+            modal::render_import_modal(f, f.area(), theme, buffer);
+        }
+        InputMode::ImportChoice { path, selected } => {
+            modal::render_import_choice(f, f.area(), theme, path, *selected);
+        }
         InputMode::Normal => {
-            if app.show_help {
-                modal::render_help_modal(f, f.area(), theme);
+            if app.show_view_menu {
+                modal::render_view_menu(f, f.area(), theme, app);
+            } else if app.show_help {
+                modal::render_help_modal(f, f.area(), theme, app);
             }
         }
     }

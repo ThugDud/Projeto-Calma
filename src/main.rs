@@ -52,6 +52,13 @@ fn run_tui() -> AppResult<()> {
 
     let mut app = App::with_config(config);
 
+    // Se a inicialização automática já estava habilitada, garante que a
+    // unidade do systemd exista e aponte para o executável atual. Isso torna
+    // a integração resiliente a atualizações e reinstalações do Calma.
+    if let Err(err) = services::autostart::reconcile_start_with_system(&app.config) {
+        app.notice = Some(format!("Inicialização automática indisponível: {}", err));
+    }
+
     // Carrega dados persistentes reais do usuário (sem dados fictícios automáticos)
     app.reload(&conn)?;
 
@@ -76,8 +83,8 @@ fn run_tui() -> AppResult<()> {
 ///
 /// O processo é independente da TUI e compartilha o mesmo banco SQLite e a
 /// mesma configuração. Notificações desktop, quando habilitadas, são
-/// entregues pelo backend selecionado em tempo de execução. Não há
-/// integração com systemd nem IPC.
+/// entregues pelo backend selecionado em tempo de execução. A TUI pode
+/// instalar e habilitar automaticamente um serviço systemd de usuário.
 fn run_daemon() -> AppResult<()> {
     let config = Config::load();
 
@@ -115,4 +122,6 @@ fn print_help() {
         "Configuração: $XDG_CONFIG_HOME/calma/config.toml (padrão: ~/.config/calma/config.toml)"
     );
     println!("Dados:        $XDG_DATA_HOME/calma/calma.db (padrão: ~/.local/share/calma/calma.db)");
+    println!("Serviço:      systemd de usuário (~/.config/systemd/user/calma-daemon.service)");
+    println!("              Habilitado automaticamente em Configurações > Iniciar com o sistema.");
 }

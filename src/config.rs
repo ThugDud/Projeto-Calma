@@ -33,8 +33,9 @@ pub const DEFAULT_DESKTOP_NOTIFICATION_BACKEND: &str = "auto";
 pub struct GeneralSettings {
     /// Iniciar o daemon automaticamente ao entrar no sistema.
     ///
-    /// Nesta fase a preferência é apenas armazenada. A integração com
-    /// systemd ainda não está implementada.
+    /// A TUI instala e habilita automaticamente um serviço systemd de
+    /// usuário quando esta opção é ativada. O backend é abstraído para
+    /// permitir outros gerenciadores de serviço no futuro.
     pub start_with_system: bool,
     /// Habilitar o monitoramento periódico em segundo plano pelo daemon.
     pub background_monitoring: bool,

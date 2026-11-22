@@ -7,6 +7,7 @@ use crate::models::event::Event;
 use crate::models::task::{Task, TaskStatus};
 use chrono::{Duration, NaiveDateTime};
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::time::{Duration as StdDuration, Instant};
 
 /// Resultado de uma verificação periódica do daemon.
@@ -19,6 +20,8 @@ pub struct CheckReport {
     pub checked_at: Option<NaiveDateTime>,
     /// Tarefas não concluídas com vencimento ou agendamento no dia atual.
     pub tasks_today: Vec<Task>,
+    /// Tarefas de hoje com horário definido dentro da antecedência configurada.
+    pub tasks_starting_soon: Vec<Task>,
     /// Tarefas não concluídas cujo vencimento já passou.
     pub overdue_tasks: Vec<Task>,
     /// Eventos que acontecem hoje e ainda não terminaram.
@@ -30,6 +33,7 @@ pub struct CheckReport {
 impl CheckReport {
     pub fn is_empty(&self) -> bool {
         self.tasks_today.is_empty()
+            && self.tasks_starting_soon.is_empty()
             && self.overdue_tasks.is_empty()
             && self.events_today.is_empty()
             && self.events_starting_soon.is_empty()
@@ -79,11 +83,12 @@ impl Scheduler {
 
     /// Executa uma verificação única de prazos e eventos.
     ///
-    /// Tarefas concluídas e eventos já encerrados são ignorados. Tarefas e
-    /// eventos são considerados "de hoje" quando a data atual coincide com o
-    /// vencimento, o agendamento ou a data do evento. Eventos com horário de
-    /// início dentro de `notifications.advance_minutes` também são expostos
-    /// separadamente para o aviso de antecedência.
+    /// Tarefas concluídas e eventos já encerrados são ignorados. Tarefas
+    /// únicas são consideradas "de hoje" quando o vencimento ou o agendamento
+    /// coincide com a data atual. Tarefas recorrentes aparecem de acordo com
+    /// sua regra e respeitam a conclusão da ocorrência do dia. Tarefas de hoje
+    /// com horário dentro de `notifications.advance_minutes` são expostas
+    /// separadamente para o aviso de antecedência, assim como eventos.
     pub fn check(
         &self,
         conn: &Connection,
@@ -97,13 +102,28 @@ impl Scheduler {
         ) as i64;
         let soon_horizon = now + Duration::minutes(lead_minutes);
 
+        let completions: HashSet<(i64, chrono::NaiveDate)> =
+            db::list_task_completions(conn)?.into_iter().collect();
+
         let tasks = db::list_tasks(conn)?;
+        let is_done_today = |task: &Task| -> bool {
+            if task.is_recurring() {
+                completions.contains(&(task.id, today))
+            } else {
+                task.status == TaskStatus::Concluida
+            }
+        };
+        let occurs_today = |task: &Task| -> bool {
+            if task.is_recurring() {
+                task.occurs_on(today)
+            } else {
+                task.due_date == Some(today) || task.scheduled_date == Some(today)
+            }
+        };
+
         let mut tasks_today: Vec<Task> = tasks
             .iter()
-            .filter(|task| {
-                task.status != TaskStatus::Concluida
-                    && (task.due_date == Some(today) || task.scheduled_date == Some(today))
-            })
+            .filter(|task| !is_done_today(task) && occurs_today(task))
             .cloned()
             .collect();
         tasks_today.sort_by_key(|task| {
@@ -114,10 +134,25 @@ impl Scheduler {
             )
         });
 
+        let mut tasks_starting_soon: Vec<Task> = tasks_today
+            .iter()
+            .filter(|task| match task.scheduled_time {
+                Some(start_time) => {
+                    let starts_at = today.and_time(start_time);
+                    starts_at > now && starts_at <= soon_horizon
+                }
+                None => false,
+            })
+            .cloned()
+            .collect();
+        tasks_starting_soon.sort_by_key(|task| (task.scheduled_time, task.title.to_lowercase()));
+
         let mut overdue_tasks: Vec<Task> = tasks
             .iter()
             .filter(|task| {
-                task.status != TaskStatus::Concluida && task.due_date.is_some_and(|due| due < today)
+                !task.is_recurring()
+                    && task.status != TaskStatus::Concluida
+                    && task.due_date.is_some_and(|due| due < today)
             })
             .cloned()
             .collect();
@@ -149,6 +184,7 @@ impl Scheduler {
         Ok(CheckReport {
             checked_at: Some(now),
             tasks_today,
+            tasks_starting_soon,
             overdue_tasks,
             events_today,
             events_starting_soon,
@@ -169,7 +205,7 @@ fn has_ended(event: &Event, now: NaiveDateTime) -> bool {
 mod tests {
     use super::*;
     use crate::models::event::Event;
-    use crate::models::task::Task;
+    use crate::models::task::{Task, TaskRecurrence};
     use chrono::{NaiveDate, NaiveTime};
 
     fn test_config(advance_minutes: u32) -> Config {
@@ -329,5 +365,68 @@ mod tests {
             .map(|event| event.title.as_str())
             .collect();
         assert_eq!(soon_titles, vec!["No limite"]);
+    }
+
+    #[test]
+    fn check_reports_recurring_tasks_and_ignores_completed_occurrence() {
+        let conn = db::init_memory().unwrap();
+        let now = fixed_now();
+        let today = now.date();
+
+        let mut daily = Task::new("Academia".into());
+        daily.recurrence = TaskRecurrence::Daily;
+        daily.scheduled_time = Some(NaiveTime::from_hms_opt(10, 30, 0).unwrap());
+        let daily_id = db::insert_task(&conn, &daily).unwrap();
+
+        let mut weekly_today = Task::new("Revisão".into());
+        weekly_today.recurrence = TaskRecurrence::Weekly;
+        // Quinta-feira (2026-11-05).
+        weekly_today.recurrence_days = 0b000_1000;
+        db::insert_task(&conn, &weekly_today).unwrap();
+
+        let mut weekly_other = Task::new("Natação".into());
+        weekly_other.recurrence = TaskRecurrence::Weekly;
+        weekly_other.recurrence_days = 0b000_0001;
+        db::insert_task(&conn, &weekly_other).unwrap();
+
+        // Tarefa recorrente com prazo antigo não deve aparecer como atrasada.
+        let mut stale = Task::new("Rotina antiga".into());
+        stale.recurrence = TaskRecurrence::Daily;
+        stale.due_date = Some(today - Duration::days(5));
+        db::insert_task(&conn, &stale).unwrap();
+
+        let config = test_config(30);
+        let scheduler = Scheduler::from_config(&config);
+        let report = scheduler
+            .check(&conn, &config, now)
+            .expect("verificação deve funcionar");
+
+        let today_titles: Vec<&str> = report
+            .tasks_today
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect();
+        assert_eq!(today_titles, vec!["Revisão", "Academia", "Rotina antiga"]);
+        assert!(report.overdue_tasks.is_empty());
+
+        let soon_titles: Vec<&str> = report
+            .tasks_starting_soon
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect();
+        assert_eq!(soon_titles, vec!["Academia"]);
+
+        db::set_task_completed_on(&conn, daily_id, today, true).unwrap();
+        let report = scheduler
+            .check(&conn, &config, now)
+            .expect("verificação deve funcionar");
+
+        let today_titles: Vec<&str> = report
+            .tasks_today
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect();
+        assert_eq!(today_titles, vec!["Revisão", "Rotina antiga"]);
+        assert!(report.tasks_starting_soon.is_empty());
     }
 }

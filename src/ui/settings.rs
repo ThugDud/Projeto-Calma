@@ -53,11 +53,22 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
 
         lines.push(setting_line(app, *setting, is_selected, theme));
 
-        // A indisponibilidade da integração com o sistema precisa ficar
-        // explícita, não apenas quando a opção estiver selecionada.
+        // O funcionamento da integração com o sistema precisa ficar
+        // explícito mesmo quando a opção não está selecionada.
         if *setting == SettingId::StartWithSystem || is_selected {
             lines.push(Line::from(Span::styled(
                 format!("      {}", setting.hint()),
+                Style::default().fg(theme.muted_fg).italic(),
+            )));
+        }
+
+        if *setting == SettingId::StartWithSystem {
+            let backend = match app.autostart.available_backend() {
+                Some(kind) => format!("Backend disponível: {}.", kind.label()),
+                None => "Nenhum gerenciador compatível detectado; nesta versão o suporte é para systemd de usuário.".to_string(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("      {}", backend),
                 Style::default().fg(theme.muted_fg).italic(),
             )));
         }

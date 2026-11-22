@@ -15,6 +15,10 @@ pub enum AppError {
     Config(String),
     /// Erro de notificação desktop (D-Bus, serviço ausente, entrega).
     Notification(String),
+    /// Erro ao exportar ou importar dados do usuário.
+    Backup(String),
+    /// Erro ao instalar, habilitar ou desabilitar serviços do sistema.
+    Service(String),
     /// Operação não implementada ainda.
     NotImplemented(String),
 }
@@ -29,6 +33,8 @@ impl std::fmt::Display for AppError {
             AppError::Serialization(msg) => write!(f, "Erro de serialização: {}", msg),
             AppError::Config(msg) => write!(f, "Erro de configuração: {}", msg),
             AppError::Notification(msg) => write!(f, "Erro de notificação: {}", msg),
+            AppError::Backup(msg) => write!(f, "Erro de backup: {}", msg),
+            AppError::Service(msg) => write!(f, "Erro de serviço: {}", msg),
             AppError::NotImplemented(msg) => write!(f, "Não implementado: {}", msg),
         }
     }

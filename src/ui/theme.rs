@@ -15,6 +15,10 @@ pub struct Theme {
     pub overdue_fg: Color,
     pub due_today_fg: Color,
     pub due_tomorrow_fg: Color,
+    /// Marcador de dias que só têm eventos.
+    pub event_fg: Color,
+    /// Marcador de dias que têm tarefas e eventos.
+    pub task_event_fg: Color,
     pub completed_fg: Color,
     pub muted_fg: Color,
     pub border: Color,
@@ -35,6 +39,8 @@ impl Default for Theme {
             overdue_fg: Color::Rgb(0xbf, 0x61, 0x6a), // vermelho suave
             due_today_fg: Color::Rgb(0xeb, 0xcb, 0x8b), // amarelo
             due_tomorrow_fg: Color::Rgb(0xeb, 0xcb, 0x8b),
+            event_fg: Color::Rgb(0x7f, 0xb3, 0xd5), // azul claro
+            task_event_fg: Color::Rgb(0xc6, 0x8f, 0xd8), // lilás
             completed_fg: Color::Rgb(0xa3, 0xbe, 0x8c), // verde
             muted_fg: Color::Rgb(0x65, 0x65, 0x65),
             border: Color::Rgb(0x4c, 0x4c, 0x4c),

@@ -77,12 +77,18 @@ impl NotificationService {
 
         if config.upcoming_tasks {
             for task in &report.tasks_today {
-                let mut reasons = Vec::new();
+                let mut reasons: Vec<String> = Vec::new();
+                if task.is_recurring() {
+                    reasons.push("se repete hoje".to_string());
+                }
                 if task.due_date == Some(day) {
-                    reasons.push("vence hoje");
+                    reasons.push("vence hoje".to_string());
                 }
                 if task.scheduled_date == Some(day) {
-                    reasons.push("está agendada para hoje");
+                    reasons.push("está agendada para hoje".to_string());
+                }
+                if let Some(time) = task.scheduled_time {
+                    reasons.push(format!("está marcada para as {}", time.format("%H:%M")));
                 }
 
                 let reason = if reasons.is_empty() {
@@ -98,6 +104,37 @@ impl NotificationService {
                         format!("A tarefa \"{}\" {}.", task.title, reason),
                     )
                     .with_key_until(format!("task-today:{}:{}", task.id, day), day),
+                );
+            }
+
+            for task in &report.tasks_starting_soon {
+                let Some(start_time) = task.scheduled_time else {
+                    continue;
+                };
+                let starts_at = day.and_time(start_time);
+                let body = match now {
+                    Some(now) => {
+                        let minutes = (starts_at - now).num_minutes().max(0);
+                        let remaining = if minutes <= 1 {
+                            "em menos de 1 minuto".to_string()
+                        } else {
+                            format!("em {} minutos", minutes)
+                        };
+                        format!("A tarefa \"{}\" começa {}.", task.title, remaining)
+                    }
+                    None => format!(
+                        "A tarefa \"{}\" começa às {}.",
+                        task.title,
+                        start_time.format("%H:%M")
+                    ),
+                };
+
+                notifications.push(
+                    Notification::new(NotificationKind::UpcomingTask, "Tarefa em breve", body)
+                        .with_key_until(
+                            format!("task-soon:{}:{}:{}", task.id, day, start_time),
+                            day,
+                        ),
                 );
             }
         }
@@ -203,7 +240,7 @@ mod tests {
     use crate::config::NotificationSettings;
     use crate::daemon::scheduler::CheckReport;
     use crate::models::event::Event;
-    use crate::models::task::Task;
+    use crate::models::task::{Task, TaskRecurrence};
     use chrono::{NaiveDate, NaiveTime};
 
     #[derive(Default)]
@@ -260,6 +297,7 @@ mod tests {
         CheckReport {
             checked_at: Some(fixed_now()),
             tasks_today: vec![upcoming],
+            tasks_starting_soon: Vec::new(),
             overdue_tasks: vec![overdue],
             events_today: Vec::new(),
             events_starting_soon: Vec::new(),
@@ -274,6 +312,7 @@ mod tests {
         CheckReport {
             checked_at: Some(now),
             tasks_today: Vec::new(),
+            tasks_starting_soon: Vec::new(),
             overdue_tasks: Vec::new(),
             events_today: vec![event.clone()],
             events_starting_soon: vec![event],
@@ -358,6 +397,40 @@ mod tests {
     }
 
     #[test]
+    fn build_creates_pre_task_notification_for_scheduled_recurring_tasks() {
+        let now = fixed_now();
+        let mut task = Task::new("Academia".into());
+        task.recurrence = TaskRecurrence::Daily;
+        task.scheduled_time = Some(NaiveTime::from_hms_opt(10, 30, 0).unwrap());
+
+        let report = CheckReport {
+            checked_at: Some(now),
+            tasks_today: vec![task.clone()],
+            tasks_starting_soon: vec![task],
+            overdue_tasks: Vec::new(),
+            events_today: Vec::new(),
+            events_starting_soon: Vec::new(),
+        };
+        let config = NotificationSettings {
+            enabled: true,
+            upcoming_tasks: true,
+            advance_minutes: 30,
+            ..NotificationSettings::default()
+        };
+        let service = NotificationService::from_config(&config);
+
+        let notifications = service.build(&report, &config);
+
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].title, "Tarefa para hoje");
+        assert!(notifications[0].body.contains("se repete hoje"));
+        assert!(notifications[0].body.contains("10:30"));
+        assert_eq!(notifications[1].title, "Tarefa em breve");
+        assert!(notifications[1].body.contains("30 minutos"));
+        assert_ne!(notifications[0].dedup_key, notifications[1].dedup_key);
+    }
+
+    #[test]
     fn dispatch_skips_notifications_already_delivered() {
         let config = NotificationSettings {
             enabled: true,
@@ -418,6 +491,7 @@ mod tests {
         let report = CheckReport {
             checked_at: Some(now),
             tasks_today: Vec::new(),
+            tasks_starting_soon: Vec::new(),
             overdue_tasks: Vec::new(),
             events_today: Vec::new(),
             events_starting_soon: vec![event],

@@ -1,9 +1,13 @@
+use crate::models::task::{TaskRecurrence, weekday_bit, weekday_from_index, weekday_short};
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Weekday};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTaskInput {
     pub title: String,
     pub due_date: Option<NaiveDate>,
+    pub scheduled_time: Option<NaiveTime>,
+    pub recurrence: TaskRecurrence,
+    pub recurrence_days: u8,
 }
 
 /// Tenta interpretar uma expressão de data em português brasileiro com relação a uma data base (`today`).
@@ -102,55 +106,189 @@ fn next_day_of_month(today: NaiveDate, target_day: u32) -> Option<NaiveDate> {
 }
 
 /// Interpreta uma entrada rápida em linguagem natural (ex: "Estudar C amanhã" -> "Estudar C", Amanhã).
+///
+/// Também reconhece horário no fim (`9h`, `09:30`) e recorrência:
+/// `diariamente`, `todo dia`, `toda segunda` ou listas como `seg,qua,sex`.
 pub fn parse_quick_task(input: &str, today: NaiveDate) -> ParsedTaskInput {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return ParsedTaskInput {
             title: String::new(),
             due_date: None,
+            scheduled_time: None,
+            recurrence: TaskRecurrence::None,
+            recurrence_days: 0,
         };
     }
 
+    let mut words: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // Horário opcional no fim (aceito antes ou depois da recorrência).
+    let mut scheduled_time = None;
+    if let Some(last) = words.last().copied() {
+        if let Some(time) = parse_time(last) {
+            scheduled_time = Some(time);
+            words.pop();
+        }
+    }
+
+    // Recorrência no final. Ex.: "Academia diariamente", "Revisar seg,qua,sex".
+    let mut recurrence = TaskRecurrence::None;
+    let mut recurrence_days = 0u8;
+    if let Some((rule, days, consumed)) = take_recurrence_suffix(&words) {
+        recurrence = rule;
+        recurrence_days = days;
+        words.truncate(words.len() - consumed);
+    }
+
+    if scheduled_time.is_none() {
+        if let Some(last) = words.last().copied() {
+            if let Some(time) = parse_time(last) {
+                scheduled_time = Some(time);
+                words.pop();
+            }
+        }
+    }
+
     // Verifica sufixos conhecidos (ex: " amanhã", " hoje", " sexta", " dia 5", " 12/11/2026")
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    let mut due_date = None;
+    let mut title = words.join(" ");
+
     if words.len() > 1 {
         // Tenta os últimos 2 tokens (ex: "dia 5", "depois de amanhã")
         if words.len() >= 3 {
             let last_three = words[words.len() - 3..].join(" ");
             if let Some(date) = parse_pt_date(&last_three, today) {
-                let title = words[..words.len() - 3].join(" ");
-                return ParsedTaskInput {
-                    title,
-                    due_date: Some(date),
-                };
+                title = words[..words.len() - 3].join(" ");
+                due_date = Some(date);
             }
         }
 
-        if words.len() >= 2 {
+        if due_date.is_none() && words.len() >= 2 {
             let last_two = words[words.len() - 2..].join(" ");
             if let Some(date) = parse_pt_date(&last_two, today) {
-                let title = words[..words.len() - 2].join(" ");
-                return ParsedTaskInput {
-                    title,
-                    due_date: Some(date),
-                };
+                title = words[..words.len() - 2].join(" ");
+                due_date = Some(date);
             }
         }
 
-        // Tenta o último token
-        let last_word = words[words.len() - 1];
-        if let Some(date) = parse_pt_date(last_word, today) {
-            let title = words[..words.len() - 1].join(" ");
-            return ParsedTaskInput {
-                title,
-                due_date: Some(date),
-            };
+        if due_date.is_none() {
+            // Tenta o último token
+            let last_word = words[words.len() - 1];
+            if let Some(date) = parse_pt_date(last_word, today) {
+                title = words[..words.len() - 1].join(" ");
+                due_date = Some(date);
+            }
         }
     }
 
+    // Tarefas com recorrência não usam uma data única de vencimento.
+    if recurrence.is_recurring() {
+        due_date = None;
+    }
+
     ParsedTaskInput {
-        title: trimmed.to_string(),
-        due_date: None,
+        title,
+        due_date,
+        scheduled_time,
+        recurrence,
+        recurrence_days,
+    }
+}
+
+/// Reconhece um sufixo de recorrência e devolve regra, máscara e quantidade de tokens consumidos.
+fn take_recurrence_suffix(words: &[&str]) -> Option<(TaskRecurrence, u8, usize)> {
+    if words.len() < 2 {
+        return None;
+    }
+
+    // Frases: "diariamente", "todo dia", "toda segunda", "toda segunda-feira".
+    for consumed in (1..=3.min(words.len() - 1)).rev() {
+        let suffix = words[words.len() - consumed..].join(" ");
+        if let Some((rule, days)) = parse_recurrence_phrase(&suffix) {
+            return Some((rule, days, consumed));
+        }
+    }
+
+    // Listas de dias: "seg,qua,sex" ou "seg qua sex".
+    for consumed in (2..=7.min(words.len() - 1)).rev() {
+        let suffix = words[words.len() - consumed..].join(" ");
+        if let Some(days) = parse_recurrence_days(&suffix) {
+            return Some((TaskRecurrence::Weekly, days, consumed));
+        }
+    }
+
+    // Lista compacta em um único token: "seg,qua,sex", "seg/qua/sex".
+    let last = words[words.len() - 1];
+    if last.contains(',') || last.contains('/') {
+        if let Some(days) = parse_recurrence_days(last) {
+            return Some((TaskRecurrence::Weekly, days, 1));
+        }
+    }
+
+    None
+}
+
+/// Interpreta expressões de recorrência como "diariamente" e "toda segunda".
+pub fn parse_recurrence_phrase(text: &str) -> Option<(TaskRecurrence, u8)> {
+    let normalized = text.trim().to_lowercase();
+    match normalized.as_str() {
+        "diariamente" | "diário" | "diario" | "diária" | "diaria" | "todo dia"
+        | "todos os dias" => Some((TaskRecurrence::Daily, 0)),
+        _ => {
+            let rest = normalized
+                .strip_prefix("toda ")
+                .or_else(|| normalized.strip_prefix("todo "))
+                .or_else(|| normalized.strip_prefix("todos "))?;
+            let weekday = parse_weekday_token(rest)?;
+            Some((TaskRecurrence::Weekly, weekday_bit(weekday)))
+        }
+    }
+}
+
+/// Interpreta uma lista de dias como "seg,qua,sex" e devolve a máscara de bits.
+pub fn parse_recurrence_days(text: &str) -> Option<u8> {
+    let tokens: Vec<&str> = text
+        .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut days = 0u8;
+    for token in tokens {
+        days |= weekday_bit(parse_weekday_token(token)?);
+    }
+    Some(days)
+}
+
+/// Converte um nome/abreviação de dia da semana em `Weekday`.
+pub fn parse_weekday_token(text: &str) -> Option<Weekday> {
+    match text.trim().to_lowercase().as_str() {
+        "seg" | "segunda" | "segunda-feira" => Some(Weekday::Mon),
+        "ter" | "terça" | "terca" | "terça-feira" | "terca-feira" => Some(Weekday::Tue),
+        "qua" | "quarta" | "quarta-feira" => Some(Weekday::Wed),
+        "qui" | "quinta" | "quinta-feira" => Some(Weekday::Thu),
+        "sex" | "sexta" | "sexta-feira" => Some(Weekday::Fri),
+        "sab" | "sáb" | "sabado" | "sábado" => Some(Weekday::Sat),
+        "dom" | "domingo" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+/// Lista os dias selecionados para exibição em uma tarefa semanal.
+pub fn recurrence_days_preview(days: u8) -> String {
+    let selected: Vec<&str> = (0..7)
+        .filter_map(weekday_from_index)
+        .filter(|weekday| days & weekday_bit(*weekday) != 0)
+        .map(weekday_short)
+        .collect();
+    if selected.is_empty() {
+        "Nenhum dia".to_string()
+    } else {
+        selected.join(", ")
     }
 }
 
@@ -365,6 +503,53 @@ mod tests {
         let t3 = parse_quick_task("Comprar comida", today);
         assert_eq!(t3.title, "Comprar comida");
         assert_eq!(t3.due_date, None);
+    }
+
+    #[test]
+    fn test_parse_quick_task_recurrence_and_time() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+
+        let daily = parse_quick_task("Academia diariamente 7h", today);
+        assert_eq!(daily.title, "Academia");
+        assert_eq!(daily.recurrence, TaskRecurrence::Daily);
+        assert_eq!(daily.recurrence_days, 0);
+        assert_eq!(daily.scheduled_time, NaiveTime::from_hms_opt(7, 0, 0));
+        assert_eq!(daily.due_date, None);
+
+        let weekly = parse_quick_task("Revisar seg,qua,sex 09:30", today);
+        assert_eq!(weekly.title, "Revisar");
+        assert_eq!(weekly.recurrence, TaskRecurrence::Weekly);
+        assert_eq!(weekly.recurrence_days, 0b001_0101);
+        assert_eq!(weekly.scheduled_time, NaiveTime::from_hms_opt(9, 30, 0));
+        assert_eq!(weekly.due_date, None);
+
+        let single = parse_quick_task("Feira toda segunda", today);
+        assert_eq!(single.title, "Feira");
+        assert_eq!(single.recurrence, TaskRecurrence::Weekly);
+        assert_eq!(single.recurrence_days, 0b000_0001);
+
+        let spaced = parse_quick_task("Corrida seg qua sex 6h", today);
+        assert_eq!(spaced.title, "Corrida");
+        assert_eq!(spaced.recurrence, TaskRecurrence::Weekly);
+        assert_eq!(spaced.recurrence_days, 0b001_0101);
+        assert_eq!(spaced.scheduled_time, NaiveTime::from_hms_opt(6, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_recurrence_helpers() {
+        assert_eq!(
+            parse_recurrence_phrase("todo dia"),
+            Some((TaskRecurrence::Daily, 0))
+        );
+        assert_eq!(
+            parse_recurrence_phrase("toda sexta"),
+            Some((TaskRecurrence::Weekly, 0b001_0000))
+        );
+        assert_eq!(parse_recurrence_days("seg,qua,sex"), Some(0b001_0101));
+        assert_eq!(parse_recurrence_days("dom"), Some(0b100_0000));
+        assert_eq!(parse_recurrence_days("seg,foo"), None);
+        assert_eq!(recurrence_days_preview(0b001_0101), "Seg, Qua, Sex");
+        assert_eq!(recurrence_days_preview(0), "Nenhum dia");
     }
 
     #[test]

@@ -1,12 +1,12 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::event::Event;
 use crate::models::project::Project;
-use crate::models::task::{Task, TaskPriority, TaskStatus};
+use crate::models::task::{Task, TaskPriority, TaskRecurrence, TaskStatus};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Inicializa o banco de dados SQLite no caminho especificado e aplica migrações.
 pub fn init(db_path: &Path) -> AppResult<Connection> {
@@ -50,6 +50,9 @@ pub fn setup_schema(conn: &Connection) -> AppResult<()> {
     }
     if current < 3 {
         migrate_v3(conn)?;
+    }
+    if current < 4 {
+        migrate_v4(conn)?;
     }
 
     Ok(())
@@ -140,6 +143,30 @@ fn migrate_v3(conn: &Connection) -> AppResult<()> {
     record_migration(conn, 3)
 }
 
+/// v4: tarefas recorrentes e histórico de conclusão por ocorrência.
+fn migrate_v4(conn: &Connection) -> AppResult<()> {
+    add_column_if_missing(conn, "tasks", "recurrence", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "tasks",
+        "recurrence_days",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_completions (
+             task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+             date TEXT NOT NULL,
+             completed_at TEXT NOT NULL,
+             PRIMARY KEY (task_id, date)
+         );
+         CREATE INDEX IF NOT EXISTS idx_task_completions_date ON task_completions(date);",
+    )
+    .map_err(|e| AppError::Database(format!("Erro na migração v4: {}", e)))?;
+
+    record_migration(conn, 4)
+}
+
 /// Adiciona uma coluna apenas se ela ainda não existir (migração segura).
 fn add_column_if_missing(
     conn: &Connection,
@@ -200,9 +227,10 @@ pub fn insert_task(conn: &Connection, task: &Task) -> AppResult<i64> {
 
     conn.execute(
         "INSERT INTO tasks (title, description, parent_id, project_id, created_at,
-                            due_date, scheduled_date, scheduled_time, status, priority,
-                            category, sort_order, completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                            due_date, scheduled_date, scheduled_time, recurrence,
+                            recurrence_days, status, priority, category, sort_order,
+                            completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             task.title,
             task.description,
@@ -212,6 +240,8 @@ pub fn insert_task(conn: &Connection, task: &Task) -> AppResult<i64> {
             task.due_date.map(|d| d.to_string()),
             task.scheduled_date.map(|d| d.to_string()),
             task.scheduled_time.map(|t| t.to_string()),
+            task.recurrence.as_i32(),
+            task.recurrence_days as i32,
             task.status as i32,
             task.priority as i32,
             task.category,
@@ -228,8 +258,9 @@ pub fn list_tasks(conn: &Connection) -> AppResult<Vec<Task>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, title, description, parent_id, project_id, created_at,
-                    due_date, scheduled_date, scheduled_time, status, priority,
-                    category, sort_order, completed_at
+                    due_date, scheduled_date, scheduled_time, recurrence,
+                    recurrence_days, status, priority, category, sort_order,
+                    completed_at
              FROM tasks
              ORDER BY sort_order ASC, id ASC",
         )
@@ -259,14 +290,18 @@ pub fn list_tasks(conn: &Connection) -> AppResult<Vec<Task>> {
             .as_deref()
             .and_then(|s| s.parse::<NaiveTime>().ok());
 
-        let status_val: i32 = row.get(9)?;
+        let recurrence_val: i32 = row.get(9)?;
+        let recurrence = TaskRecurrence::from_i32(recurrence_val);
+        let recurrence_days: u8 = row.get::<_, i32>(10)? as u8;
+
+        let status_val: i32 = row.get(11)?;
         let status = match status_val {
             1 => TaskStatus::EmAndamento,
             2 => TaskStatus::Concluida,
             _ => TaskStatus::Pendente,
         };
 
-        let priority_val: i32 = row.get(10)?;
+        let priority_val: i32 = row.get(12)?;
         let priority = match priority_val {
             0 => TaskPriority::Baixa,
             2 => TaskPriority::Alta,
@@ -274,7 +309,7 @@ pub fn list_tasks(conn: &Connection) -> AppResult<Vec<Task>> {
             _ => TaskPriority::Normal,
         };
 
-        let completed_at_str: Option<String> = row.get(13)?;
+        let completed_at_str: Option<String> = row.get(15)?;
         let completed_at = completed_at_str
             .as_deref()
             .and_then(|s| parse_datetime(s).ok());
@@ -289,10 +324,12 @@ pub fn list_tasks(conn: &Connection) -> AppResult<Vec<Task>> {
             due_date,
             scheduled_date,
             scheduled_time,
+            recurrence,
+            recurrence_days,
             status,
             priority,
-            category: row.get(11)?,
-            sort_order: row.get(12)?,
+            category: row.get(13)?,
+            sort_order: row.get(14)?,
             completed_at,
         });
     }
@@ -312,9 +349,10 @@ pub fn update_task(conn: &Connection, task: &Task) -> AppResult<()> {
     conn.execute(
         "UPDATE tasks SET title = ?1, description = ?2, parent_id = ?3,
                           project_id = ?4, due_date = ?5, scheduled_date = ?6,
-                          scheduled_time = ?7, status = ?8, priority = ?9,
-                          category = ?10, sort_order = ?11, completed_at = ?12
-         WHERE id = ?13",
+                          scheduled_time = ?7, recurrence = ?8, recurrence_days = ?9,
+                          status = ?10, priority = ?11, category = ?12,
+                          sort_order = ?13, completed_at = ?14
+         WHERE id = ?15",
         params![
             task.title,
             task.description,
@@ -323,6 +361,8 @@ pub fn update_task(conn: &Connection, task: &Task) -> AppResult<()> {
             task.due_date.map(|d| d.to_string()),
             task.scheduled_date.map(|d| d.to_string()),
             task.scheduled_time.map(|t| t.to_string()),
+            task.recurrence.as_i32(),
+            task.recurrence_days as i32,
             task.status as i32,
             task.priority as i32,
             task.category,
@@ -357,6 +397,53 @@ pub fn mark_task_completed(conn: &Connection, task_id: i64, completed: bool) -> 
         .map_err(|e| AppError::Database(format!("Erro ao reabrir tarefa: {}", e)))?;
     }
     Ok(())
+}
+
+/// Marca ou desmarca a ocorrência de uma tarefa recorrente em uma data.
+pub fn set_task_completed_on(
+    conn: &Connection,
+    task_id: i64,
+    date: NaiveDate,
+    completed: bool,
+) -> AppResult<()> {
+    if completed {
+        let now = chrono::Local::now().naive_local();
+        conn.execute(
+            "INSERT OR REPLACE INTO task_completions (task_id, date, completed_at)
+             VALUES (?1, ?2, ?3)",
+            params![task_id, date.to_string(), now.to_string()],
+        )
+        .map_err(|e| AppError::Database(format!("Erro ao concluir ocorrência da tarefa: {}", e)))?;
+    } else {
+        conn.execute(
+            "DELETE FROM task_completions WHERE task_id = ?1 AND date = ?2",
+            params![task_id, date.to_string()],
+        )
+        .map_err(|e| AppError::Database(format!("Erro ao reabrir ocorrência da tarefa: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Lista o histórico de conclusões de tarefas recorrentes.
+pub fn list_task_completions(conn: &Connection) -> AppResult<Vec<(i64, NaiveDate)>> {
+    let mut stmt = conn
+        .prepare("SELECT task_id, date FROM task_completions ORDER BY date ASC")
+        .map_err(|e| AppError::Database(format!("Erro ao preparar conclusões: {}", e)))?;
+
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| AppError::Database(format!("Erro ao listar conclusões: {}", e)))?;
+
+    let mut completions = Vec::new();
+    while let Some(row) = rows.next()? {
+        let task_id: i64 = row.get(0)?;
+        let date_str: String = row.get(1)?;
+        if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            completions.push((task_id, date));
+        }
+    }
+
+    Ok(completions)
 }
 
 /// Verifica se `potential_ancestor_id` é pai, avô, etc., de `candidate_parent_id`.
@@ -642,6 +729,50 @@ mod tests {
         delete_task(&conn, id).expect("Excluir tarefa");
         let tasks_empty = list_tasks(&conn).unwrap();
         assert_eq!(tasks_empty.len(), 0);
+    }
+
+    #[test]
+    fn test_recurring_task_crud_and_completions() {
+        let conn = init_memory().expect("banco em memória");
+
+        let mut task = Task::new("Academia".into());
+        task.recurrence = crate::models::task::TaskRecurrence::Weekly;
+        task.recurrence_days = 0b001_0101;
+        task.scheduled_time = NaiveTime::from_hms_opt(7, 0, 0);
+        let id = insert_task(&conn, &task).expect("inserir tarefa recorrente");
+
+        let tasks = list_tasks(&conn).expect("listar tarefas");
+        assert_eq!(
+            tasks[0].recurrence,
+            crate::models::task::TaskRecurrence::Weekly
+        );
+        assert_eq!(tasks[0].recurrence_days, 0b001_0101);
+        assert_eq!(tasks[0].scheduled_time, NaiveTime::from_hms_opt(7, 0, 0));
+
+        let mut updated = tasks[0].clone();
+        updated.recurrence = crate::models::task::TaskRecurrence::Daily;
+        updated.recurrence_days = 0;
+        update_task(&conn, &updated).expect("atualizar recorrência");
+        let tasks = list_tasks(&conn).expect("listar após atualizar");
+        assert_eq!(
+            tasks[0].recurrence,
+            crate::models::task::TaskRecurrence::Daily
+        );
+        assert_eq!(tasks[0].recurrence_days, 0);
+
+        let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        set_task_completed_on(&conn, id, day, true).expect("concluir ocorrência");
+        assert_eq!(list_task_completions(&conn).unwrap(), vec![(id, day)]);
+
+        set_task_completed_on(&conn, id, day, false).expect("reabrir ocorrência");
+        assert!(list_task_completions(&conn).unwrap().is_empty());
+
+        set_task_completed_on(&conn, id, day, true).expect("concluir novamente");
+        delete_task(&conn, id).expect("excluir tarefa");
+        assert!(
+            list_task_completions(&conn).unwrap().is_empty(),
+            "conclusões devem ser removidas em cascata"
+        );
     }
 
     #[test]

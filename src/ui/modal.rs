@@ -1,15 +1,18 @@
-use crate::app::{App, DeleteTarget, EventEditState, TaskEditState};
-use crate::models::task::TaskPriority;
+use crate::app::{App, DeleteTarget, EventEditState, TaskEditState, View};
+use crate::models::task::{
+    TaskPriority, TaskRecurrence, WEEKDAY_ORDER, recurrence_days_label, weekday_bit, weekday_short,
+};
 use crate::services::date_parser::{
     parse_pt_date, parse_quick_event, parse_quick_task, parse_time,
 };
+use crate::services::portability::ImportMode;
 use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Stylize;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 pub fn render_quick_add(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
     // O prefixo "event:" continua funcionando no cadastro rápido global.
@@ -18,7 +21,7 @@ pub fn render_quick_add(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
         return;
     }
 
-    let popup_area = centered_rect(65, 30, area);
+    let popup_area = centered_rect(78, 30, area);
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
@@ -32,7 +35,21 @@ pub fn render_quick_add(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
 
     let parsed = parse_quick_task(&app.input_buffer, app.today);
 
-    let parsed_preview = if let Some(d) = parsed.due_date {
+    let parsed_preview = if parsed.recurrence.is_recurring() {
+        let rule = match parsed.recurrence {
+            TaskRecurrence::Daily => "diária".to_string(),
+            TaskRecurrence::Weekly => format!(
+                "semanal ({})",
+                recurrence_days_label(parsed.recurrence_days)
+            ),
+            TaskRecurrence::None => "nenhuma".to_string(),
+        };
+        let time = parsed
+            .scheduled_time
+            .map(|time| time.format("%H:%M").to_string())
+            .unwrap_or_else(|| "sem horário".to_string());
+        format!("Repetição: {} | Horário: {}", rule, time)
+    } else if let Some(d) = parsed.due_date {
         format!(
             "Data interpretada: {} ({})",
             d.format("%d/%m/%Y"),
@@ -44,7 +61,7 @@ pub fn render_quick_add(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Digite a tarefa (ex: 'Estudar C amanhã', 'Pagar conta dia 5'):",
+            "Digite a tarefa (ex: 'Estudar C amanhã', 'Academia diariamente 7h', 'Revisar seg,qua,sex'):",
             theme.muted_style(),
         )),
         Line::from(""),
@@ -223,7 +240,7 @@ pub fn render_confirm_delete(
 
 /// Renderiza formulário funcional para edição de tarefa (Prioridade 3).
 pub fn render_edit_task(f: &mut Frame, area: Rect, theme: &Theme, app: &App, edit: &TaskEditState) {
-    let popup_area = centered_rect(70, 50, area);
+    let popup_area = centered_rect(72, 68, area);
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
@@ -300,8 +317,117 @@ pub fn render_edit_task(f: &mut Frame, area: Rect, theme: &Theme, app: &App, edi
     ]));
     lines.push(Line::from(""));
 
-    // Campo 2: Prioridade
-    let prio_prefix = if edit.active_field == 2 {
+    // Campo 2: Horário
+    let time_prefix = if edit.active_field == 2 {
+        " ▶ Horário: "
+    } else {
+        "   Horário: "
+    };
+    let time_style = if edit.active_field == 2 {
+        Style::default()
+            .bg(theme.selected_bg)
+            .fg(theme.selected_fg)
+            .bold()
+    } else {
+        Style::default().fg(theme.fg)
+    };
+    let time_preview = if edit.time_str.trim().is_empty() {
+        " -> (Sem horário)".to_string()
+    } else {
+        match parse_time(&edit.time_str) {
+            Some(time) => format!(" -> Reconhecido: {}", time.format("%H:%M")),
+            None => " -> (Formato inválido)".to_string(),
+        }
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            time_prefix,
+            Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)).bold(),
+        ),
+        Span::styled(format!("{}_", edit.time_str), time_style),
+        Span::styled(
+            time_preview,
+            Style::default().fg(Color::Rgb(0xeb, 0xcb, 0x8b)),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Campo 3: Repetição
+    let repeat_prefix = if edit.active_field == 3 {
+        " ▶ Repetição: "
+    } else {
+        "   Repetição: "
+    };
+    let repeat_options = [
+        (TaskRecurrence::None, "Nenhuma (0)"),
+        (TaskRecurrence::Daily, "Diária (1)"),
+        (TaskRecurrence::Weekly, "Semanal (2)"),
+    ];
+    let mut repeat_spans = vec![Span::styled(
+        repeat_prefix,
+        Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)).bold(),
+    )];
+    for (rule, label) in repeat_options {
+        let is_current = rule == edit.recurrence;
+        let style = if is_current {
+            Style::default()
+                .bg(theme.selected_bg)
+                .fg(Color::Rgb(0xeb, 0xcb, 0x8b))
+                .bold()
+        } else {
+            Style::default().fg(theme.muted_fg)
+        };
+        repeat_spans.push(Span::styled(format!(" [{}] ", label), style));
+    }
+    lines.push(Line::from(repeat_spans));
+    lines.push(Line::from(""));
+
+    // Campo 4: Dias da semana (usado apenas na repetição semanal)
+    let days_prefix = if edit.active_field == 4 {
+        " ▶ Dias:      "
+    } else {
+        "   Dias:      "
+    };
+    let mut day_spans = vec![Span::styled(
+        days_prefix,
+        Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)).bold(),
+    )];
+    for weekday in WEEKDAY_ORDER {
+        let selected = edit.recurrence_days & weekday_bit(weekday) != 0;
+        let style = if selected && edit.recurrence == TaskRecurrence::Weekly {
+            Style::default()
+                .bg(theme.selected_bg)
+                .fg(Color::Rgb(0xeb, 0xcb, 0x8b))
+                .bold()
+        } else {
+            Style::default().fg(theme.muted_fg)
+        };
+        day_spans.push(Span::styled(format!(" {} ", weekday_short(weekday)), style));
+    }
+    day_spans.push(Span::styled(
+        " (1-7 alternam)",
+        Style::default().fg(theme.muted_fg),
+    ));
+    lines.push(Line::from(day_spans));
+
+    let recurrence_hint = if edit.recurrence == TaskRecurrence::Weekly {
+        format!(
+            "     Repetição semanal em: {}",
+            recurrence_days_label(edit.recurrence_days)
+        )
+    } else if edit.recurrence == TaskRecurrence::Daily {
+        "     A tarefa aparece todos os dias.".to_string()
+    } else {
+        "     Tarefa única; o prazo e o horário acima são usados.".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        recurrence_hint,
+        Style::default().fg(theme.muted_fg),
+    )));
+    lines.push(Line::from(""));
+
+    // Campo 5: Prioridade
+    let prio_prefix = if edit.active_field == 5 {
         " ▶ Prioridade: "
     } else {
         "   Prioridade: "
@@ -337,8 +463,8 @@ pub fn render_edit_task(f: &mut Frame, area: Rect, theme: &Theme, app: &App, edi
     lines.push(Line::from(prio_spans));
     lines.push(Line::from(""));
 
-    // Campo 3: Projeto
-    let proj_prefix = if edit.active_field == 3 {
+    // Campo 6: Projeto
+    let proj_prefix = if edit.active_field == 6 {
         " ▶ Projeto: "
     } else {
         "   Projeto: "
@@ -358,7 +484,7 @@ pub fn render_edit_task(f: &mut Frame, area: Rect, theme: &Theme, app: &App, edi
                 "[ {} ] (Pressione 'p' para alternar projeto)",
                 current_proj_name
             ),
-            if edit.active_field == 3 {
+            if edit.active_field == 6 {
                 Style::default()
                     .bg(theme.selected_bg)
                     .fg(theme.selected_fg)
@@ -656,71 +782,377 @@ pub fn render_new_subtask(
     f.render_widget(p, inner);
 }
 
-pub fn render_help_modal(f: &mut Frame, area: Rect, theme: &Theme) {
-    let popup_area = centered_rect(72, 75, area);
+pub fn render_export_modal(f: &mut Frame, area: Rect, theme: &Theme, app: &App, buffer: &str) {
+    let popup_area = centered_rect(72, 40, area);
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)))
         .style(theme.style())
-        .title(" [ Calma - Ajuda e Atalhos ] ");
+        .title(" [ Exportar Dados ] ");
 
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
-    let help_lines = vec![
+    let lines = vec![
         Line::from(Span::styled(
-            "Navegação entre Visualizações:",
-            Style::default().bold().fg(Color::Rgb(0x8f, 0xbc, 0xbb)),
+            "Exporta projetos, tarefas e eventos para um arquivo JSON versionado.",
+            theme.muted_style(),
         )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Arquivo de destino:",
+            Style::default().bold().fg(theme.fg),
+        )),
+        Line::from(vec![
+            Span::styled(
+                " > ",
+                Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)).bold(),
+            ),
+            Span::styled(format!("{}_", buffer), Style::default().fg(theme.fg).bold()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "Conteúdo atual: {} projetos, {} tarefas e {} eventos.",
+                app.projects.len(),
+                app.tasks.len(),
+                app.events.len()
+            ),
+            theme.muted_style(),
+        )),
+        Line::from(Span::styled(
+            "Dica: use ~ para representar o diretório pessoal. O arquivo é gravado de forma atômica.",
+            theme.muted_style(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Enter] Exportar   |   [Esc] Cancelar",
+            Style::default().fg(theme.muted_fg),
+        )),
+    ];
+
+    let p = Paragraph::new(Text::from(lines))
+        .block(Block::default())
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Left);
+    f.render_widget(p, inner);
+}
+
+pub fn render_import_modal(f: &mut Frame, area: Rect, theme: &Theme, buffer: &str) {
+    let popup_area = centered_rect(72, 40, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)))
+        .style(theme.style())
+        .title(" [ Importar Dados ] ");
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Informe o arquivo JSON gerado pela exportação do Calma.",
+            theme.muted_style(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Arquivo de origem:",
+            Style::default().bold().fg(theme.fg),
+        )),
+        Line::from(vec![
+            Span::styled(
+                " > ",
+                Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)).bold(),
+            ),
+            Span::styled(format!("{}_", buffer), Style::default().fg(theme.fg).bold()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "No próximo passo você escolhe entre adicionar ou sobrescrever.",
+            theme.muted_style(),
+        )),
+        Line::from(Span::styled(
+            "Dica: use ~ para representar o diretório pessoal.",
+            theme.muted_style(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Enter] Continuar   |   [Esc] Cancelar",
+            Style::default().fg(theme.muted_fg),
+        )),
+    ];
+
+    let p = Paragraph::new(Text::from(lines))
+        .block(Block::default())
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Left);
+    f.render_widget(p, inner);
+}
+
+pub fn render_import_choice(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    path: &str,
+    selected: ImportMode,
+) {
+    let popup_area = centered_rect(76, 50, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)))
+        .style(theme.style())
+        .title(" [ Importar Dados - Escolha o Modo ] ");
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let marker =
+        |mode: ImportMode| -> &'static str { if selected == mode { "[x]" } else { "[ ]" } };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Arquivo: ", Style::default().bold().fg(theme.fg)),
+            Span::styled(path.to_string(), Style::default().fg(theme.muted_fg)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Escolha como aplicar o backup:",
+            Style::default().bold().fg(theme.fg),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("  {} ", marker(ImportMode::Add)),
+                Style::default().fg(if selected == ImportMode::Add {
+                    Color::Rgb(0x8f, 0xbc, 0xbb)
+                } else {
+                    theme.muted_fg
+                }),
+            ),
+            Span::styled("Importar e adicionar", Style::default().fg(theme.fg).bold()),
+        ]),
+        Line::from(Span::styled(
+            "      Mantém os dados atuais e ignora itens duplicados.",
+            theme.muted_style(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("  {} ", marker(ImportMode::Overwrite)),
+                Style::default().fg(if selected == ImportMode::Overwrite {
+                    theme.overdue_fg
+                } else {
+                    theme.muted_fg
+                }),
+            ),
+            Span::styled(
+                "Importar e sobrescrever",
+                Style::default().fg(theme.fg).bold(),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "      Apaga todos os projetos, tarefas e eventos atuais antes de importar.",
+            theme.muted_style(),
+        )),
+        Line::from(""),
+    ];
+
+    if selected == ImportMode::Overwrite {
+        lines.push(Line::from(Span::styled(
+            "ATENÇÃO: esta opção é destrutiva e não pode ser desfeita.",
+            Style::default()
+                .fg(theme.overdue_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Nenhum dado atual será removido neste modo.",
+            Style::default().fg(theme.completed_fg),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[↑↓/jk/Espaço] Alternar   |   [a] Adicionar   |   [o] Sobrescrever   |   [Enter] Confirmar   |   [Esc] Cancelar",
+        Style::default().fg(theme.muted_fg),
+    )));
+
+    let p = Paragraph::new(Text::from(lines))
+        .block(Block::default())
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Left);
+    f.render_widget(p, inner);
+}
+
+pub fn render_help_modal(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
+    let popup_area = centered_rect(86, 92, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)))
+        .style(theme.style())
+        .title(" [ Calma - Ajuda, Atalhos e Sintaxe ] ");
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let accent = Style::default().bold().fg(Color::Rgb(0x8f, 0xbc, 0xbb));
+    let help_lines = vec![
+        Line::from(Span::styled("Navegação entre Visualizações:", accent)),
+        Line::from("  Tab    : Abrir menu de seções (↑↓/jk, Enter, 1-7)"),
         Line::from("  1 ou m : Calendário Mensal"),
         Line::from("  2 ou l : Lista de Tarefas"),
         Line::from("  3 ou h : Árvore de Projetos e Hierarquia"),
         Line::from("  4 ou v : Visão Geral & Prazos (Dashboard)"),
         Line::from("  5      : Agenda de Eventos"),
+        Line::from("  6      : Configurações"),
+        Line::from("  7      : Tarefas Recorrentes (colunas por dia da semana)"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Gerenciamento de Tarefas e Projetos:",
-            Style::default().bold().fg(Color::Rgb(0x8f, 0xbc, 0xbb)),
-        )),
+        Line::from(Span::styled("Gerenciamento de Tarefas e Projetos:", accent)),
         Line::from("  n      : Nova Tarefa rápida (ou novo Evento na tela de Eventos)"),
-        Line::from("  E      : Novo Evento rápido (ex: 'Reunião amanhã 14:30')"),
+        Line::from("  E      : Novo Evento rápido"),
         Line::from("  s      : Nova Subtarefa (na visualização hierárquica)"),
         Line::from("  p / P  : Novo Projeto ou Subprojeto"),
         Line::from("  e      : Editar tarefa, projeto ou evento selecionado"),
         Line::from("  d      : Excluir item (com confirmação segura antes de apagar)"),
         Line::from("  Espaço : Concluir ou reabrir tarefa selecionada"),
+        Line::from("           Em tarefas recorrentes, vale só para a ocorrência do dia"),
         Line::from("  Enter  : Expandir / Recolher nível na árvore hierárquica"),
         Line::from("  j / k  : Navegar na seleção (calendário, dashboard e eventos)"),
         Line::from(""),
+        Line::from(Span::styled("Tarefas Recorrentes (seção 7):", accent)),
+        Line::from("  7 colunas: Seg, Ter, Qua, Qui, Sex, Sáb, Dom"),
+        Line::from("  O dia atual aparece destacado; tarefas diárias aparecem em todas."),
+        Line::from("  ← / → : Trocar de coluna (dia da semana)"),
+        Line::from("  ↑ / ↓ : Selecionar tarefa dentro da coluna"),
+        Line::from("  Espaço: Concluir a ocorrência daquele dia"),
+        Line::from("  e / d : Editar ou excluir a série recorrente"),
+        Line::from(""),
         Line::from(Span::styled(
-            "Controle do Calendário:",
-            Style::default().bold().fg(Color::Rgb(0x8f, 0xbc, 0xbb)),
+            "Sintaxe do Cadastro Rápido de Tarefas:",
+            accent,
         )),
+        Line::from("  Título [data] [hora] [repetição]"),
+        Line::from("  Tudo antes do sufixo reconhecido é o título."),
+        Line::from("  Data (no fim):"),
+        Line::from("    hoje | amanhã (amanha) | depois de amanhã (amanha)"),
+        Line::from("    segunda|seg, terça|ter, quarta|qua, quinta|qui,"),
+        Line::from("    sexta|sex, sábado|sab, domingo|dom (aceita -feira)"),
+        Line::from("    dia 5 | 05/12/2026 | 05/12 | 2026-12-05"),
+        Line::from("  Hora (no fim, antes ou depois da repetição):"),
+        Line::from("    09:30 | 09:30:00 | 9h | 9h30"),
+        Line::from("  Repetição (no fim):"),
+        Line::from("    diariamente | diário | diario | diária | diaria"),
+        Line::from("    todo dia | todos os dias"),
+        Line::from("    toda segunda ... toda domingo (também todo/todos)"),
+        Line::from("    seg,qua,sex | seg/qua/sex | seg qua sex"),
+        Line::from("  Repetição substitui a data única da tarefa."),
+        Line::from("  Ex.: Academia diariamente 7h"),
+        Line::from("       Revisar seg,qua,sex 09:30 | Feira toda segunda"),
+        Line::from("       Prova 12/11/2026 14h"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Sintaxe do Cadastro Rápido de Eventos:",
+            accent,
+        )),
+        Line::from("  Título [data] [hora_início[-hora_fim]]"),
+        Line::from("  Data: as mesmas expressões de tarefa; sem data = hoje."),
+        Line::from("  Só a data (sem título) cria um evento sem título."),
+        Line::from("  Hora: 14:30 | 14h | 14h30 | 14:30-16:00 | 14h-16h"),
+        Line::from("  'event:' no cadastro global força a criação de um evento."),
+        Line::from("  Ex.: Reunião amanhã 14:30"),
+        Line::from("       Consulta dia 5 9h | Prova 12/11/2026 14h-16h"),
+        Line::from("       event:Retrospectiva sexta 16h"),
+        Line::from(""),
+        Line::from(Span::styled("Controle do Calendário:", accent)),
         Line::from("  Setas  : Mover dia (← →) ou semana (↑ ↓)"),
         Line::from("  PgUp   : Mês anterior"),
         Line::from("  PgDn   : Próximo mês"),
         Line::from("  t      : Voltar para Hoje"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Geral:",
-            Style::default().bold().fg(Color::Rgb(0x8f, 0xbc, 0xbb)),
-        )),
+        Line::from(Span::styled("Backup dos Dados:", accent)),
+        Line::from("  x      : Exportar projetos, tarefas e eventos para um JSON"),
+        Line::from("  i      : Importar de um JSON"),
+        Line::from("           'Adicionar' mantém os dados atuais e ignora duplicatas,"),
+        Line::from("           'Sobrescrever' apaga os dados atuais antes de importar."),
+        Line::from(""),
+        Line::from(Span::styled("Inicialização Automática:", accent)),
+        Line::from("  Configurações [6] > Iniciar com o sistema cria e habilita"),
+        Line::from("  o serviço systemd de usuário (calma-daemon.service)."),
+        Line::from("  Nenhum arquivo .service precisa ser criado manualmente."),
+        Line::from(""),
+        Line::from(Span::styled("Geral:", accent)),
         Line::from("  ?      : Abrir/Fechar esta tela de ajuda"),
         Line::from("  Esc    : Voltar / Cancelar diálogo"),
         Line::from("  q      : Sair do Calma"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Pressione Esc ou ? para fechar esta janela.",
-            Style::default()
-                .fg(theme.muted_fg)
-                .add_modifier(Modifier::ITALIC),
-        )),
     ];
 
-    let p = Paragraph::new(Text::from(help_lines));
-    f.render_widget(p, inner);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let max_scroll = help_lines.len().saturating_sub(chunks[0].height as usize) as u16;
+    let scroll = app.help_scroll.min(max_scroll);
+    let content = Paragraph::new(Text::from(help_lines)).scroll((scroll, 0));
+    f.render_widget(content, chunks[0]);
+
+    let footer = Line::from(vec![
+        Span::styled(
+            " ↑↓/jk e PgUp/PgDn rolam | Home/End início/fim ",
+            theme.muted_style(),
+        ),
+        Span::styled("| Esc ou ? fecha ", theme.muted_style()),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[1]);
+}
+
+/// Renderiza o menu de seleção de seções.
+pub fn render_view_menu(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
+    let width = area.width.min(54);
+    let height = area.height.min(View::MENU.len() as u16 + 6);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .style(theme.style())
+        .title(" [ Menu de Seções ] ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, (_view, label, key)) in View::MENU.iter().enumerate() {
+        let selected = idx == app.view_menu_idx;
+        let prefix = if selected { " ▶ " } else { "   " };
+        let text = format!("{}{}  {}  ", prefix, key, label);
+        let style = if selected {
+            Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.selected_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑↓/jk navegam | Enter abre | Esc fecha",
+        theme.muted_style(),
+    )));
+
+    f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

@@ -149,6 +149,19 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
                 ));
             }
 
+            // Repetição (tarefas recorrentes)
+            if let Some(label) = &item.repeat_label {
+                spans.push(Span::styled(
+                    format!("↻ {} ", label),
+                    Style::default().fg(Color::Rgb(0x8f, 0xbc, 0xbb)),
+                ));
+            } else if let Some(time) = item.scheduled_time {
+                spans.push(Span::styled(
+                    format!("({}) ", time.format("%H:%M")),
+                    Style::default().fg(theme.muted_fg),
+                ));
+            }
+
             // Progresso de subtarefas se houver
             if let Some((completed, total)) = item.progress {
                 spans.push(Span::styled(

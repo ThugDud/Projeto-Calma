@@ -32,17 +32,21 @@ pub fn render(
     let completed = app
         .tasks
         .iter()
-        .filter(|t| t.status == TaskStatus::Concluida)
+        .filter(|t| app.task_status_on(t, today) == TaskStatus::Concluida)
         .count();
     let overdue = app
         .tasks
         .iter()
-        .filter(|t| t.status != TaskStatus::Concluida && t.due_date.is_some_and(|d| d < today))
+        .filter(|t| {
+            !t.is_recurring()
+                && t.status != TaskStatus::Concluida
+                && t.due_date.is_some_and(|d| d < today)
+        })
         .count();
     let due_today = app
         .tasks
         .iter()
-        .filter(|t| t.status != TaskStatus::Concluida && t.due_date == Some(today))
+        .filter(|t| app.task_occurs_on(t, today) && !app.task_completed_on(t, today))
         .count();
 
     let title_span = Span::styled(
@@ -53,13 +57,11 @@ pub fn render(
             .bold(),
     );
 
-    let view_name = match app.current_view {
-        crate::app::View::Calendario => "[1: Calendário]",
-        crate::app::View::Tarefas => "[2: Tarefas]",
-        crate::app::View::Hierarquia => "[3: Hierarquia]",
-        crate::app::View::VisaoGeral => "[4: Visão Geral]",
-        crate::app::View::Eventos => "[5: Eventos]",
-    };
+    let view_name = format!(
+        "[{}: {}]",
+        app.current_view.shortcut(),
+        app.current_view.label()
+    );
 
     let date_line = format!(
         "{} | {:02}/{:02}/{} | {}   |   Visualização: {}",
@@ -91,7 +93,7 @@ pub fn render(
         ),
     ];
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             title_span,
             Span::raw(" "),
@@ -99,6 +101,15 @@ pub fn render(
         ]),
         Line::from(stats_spans),
     ];
+
+    if let Some(notice) = &app.notice {
+        lines.push(Line::from(Span::styled(
+            notice.clone(),
+            Style::default()
+                .fg(theme.due_today_fg)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+    }
 
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });

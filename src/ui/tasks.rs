@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::models::task::{TaskPriority, TaskStatus};
+use crate::models::task::{TaskPriority, TaskStatus, recurrence_days_label};
 use crate::services::date_parser::format_due_label;
 use crate::ui::theme::Theme;
 use ratatui::Frame;
@@ -48,7 +48,8 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
         .enumerate()
         .map(|(idx, task)| {
             let is_selected = idx == app.selected_index;
-            let (status_icon, status_color) = match task.status {
+            let effective_status = app.task_status_on(task, app.today);
+            let (status_icon, status_color) = match effective_status {
                 TaskStatus::Concluida => ("[✓]", theme.completed_fg),
                 TaskStatus::EmAndamento => ("[~]", Color::Rgb(0xeb, 0xcb, 0x8b)),
                 TaskStatus::Pendente => ("[ ]", theme.fg),
@@ -61,20 +62,61 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
                 TaskPriority::Baixa => ("Baixa", theme.muted_fg),
             };
 
-            let is_completed = task.status == TaskStatus::Concluida;
-            let (due_text, due_kind) = format_due_label(task.due_date, app.today, is_completed);
-            let due_color = match due_kind {
-                "overdue" => theme.overdue_fg,
-                "due_today" => theme.due_today_fg,
-                "due_soon" => Color::Rgb(0xeb, 0xcb, 0x8b),
-                "completed" => theme.completed_fg,
-                _ => theme.muted_fg,
+            let is_completed = effective_status == TaskStatus::Concluida;
+            let (due_date_str, due_text, due_color) = if task.is_recurring() {
+                let occurs_today = app.task_occurs_on(task, app.today);
+                let situation = if is_completed {
+                    "Concluída hoje"
+                } else if occurs_today {
+                    "Hoje"
+                } else {
+                    "Recorrente"
+                };
+                let rule = match task.recurrence {
+                    crate::models::task::TaskRecurrence::Daily => "Diária".to_string(),
+                    crate::models::task::TaskRecurrence::Weekly => {
+                        recurrence_days_label(task.recurrence_days)
+                    }
+                    crate::models::task::TaskRecurrence::None => "-".to_string(),
+                };
+                let rule = match task.scheduled_time {
+                    Some(time) => format!("{} {}", rule, time.format("%H:%M")),
+                    None => rule,
+                };
+                (
+                    rule,
+                    situation.to_string(),
+                    if is_completed {
+                        theme.completed_fg
+                    } else if occurs_today {
+                        theme.due_today_fg
+                    } else {
+                        Color::Rgb(0x8f, 0xbc, 0xbb)
+                    },
+                )
+            } else {
+                let (due_text, due_kind) = format_due_label(task.due_date, app.today, is_completed);
+                let due_color = match due_kind {
+                    "overdue" => theme.overdue_fg,
+                    "due_today" => theme.due_today_fg,
+                    "due_soon" => Color::Rgb(0xeb, 0xcb, 0x8b),
+                    "completed" => theme.completed_fg,
+                    _ => theme.muted_fg,
+                };
+                (
+                    task.due_date
+                        .map(|d| d.format("%d/%m/%Y").to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    due_text,
+                    due_color,
+                )
             };
 
-            let due_date_str = task
-                .due_date
-                .map(|d| d.format("%d/%m/%Y").to_string())
-                .unwrap_or_else(|| "-".to_string());
+            let title_text = if task.is_recurring() {
+                format!(" ↻ {}", task.title)
+            } else {
+                format!(" {}", task.title)
+            };
 
             let project_name = task
                 .category
@@ -105,7 +147,7 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
                     format!(" {} ", status_icon),
                     Style::default().fg(status_color),
                 ),
-                Span::styled(format!(" {}", task.title), row_style),
+                Span::styled(title_text, row_style),
                 Span::styled(format!(" {}", prio_label), Style::default().fg(prio_color)),
                 Span::styled(format!(" {}", due_date_str), row_style),
                 Span::styled(format!(" {}", due_text), Style::default().fg(due_color)),
@@ -120,11 +162,11 @@ pub fn render(f: &mut Frame, area: Rect, theme: &Theme, app: &App) {
 
     let widths = [
         Constraint::Length(5),
-        Constraint::Percentage(35),
-        Constraint::Length(12),
+        Constraint::Percentage(33),
         Constraint::Length(12),
         Constraint::Length(20),
-        Constraint::Percentage(20),
+        Constraint::Length(20),
+        Constraint::Percentage(18),
     ];
 
     let table = Table::new(rows, widths)

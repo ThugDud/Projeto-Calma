@@ -11,6 +11,14 @@ pub enum AppError {
     Business(String),
     /// Erro de serialização/desserialização.
     Serialization(String),
+    /// Erro ao carregar, validar ou salvar configurações.
+    Config(String),
+    /// Erro de notificação desktop (D-Bus, serviço ausente, entrega).
+    Notification(String),
+    /// Erro ao exportar ou importar dados do usuário.
+    Backup(String),
+    /// Erro ao instalar, habilitar ou desabilitar serviços do sistema.
+    Service(String),
     /// Operação não implementada ainda.
     NotImplemented(String),
 }
@@ -23,6 +31,10 @@ impl std::fmt::Display for AppError {
             AppError::Input(msg) => write!(f, "Entrada inválida: {}", msg),
             AppError::Business(msg) => write!(f, "Erro de regra de negócio: {}", msg),
             AppError::Serialization(msg) => write!(f, "Erro de serialização: {}", msg),
+            AppError::Config(msg) => write!(f, "Erro de configuração: {}", msg),
+            AppError::Notification(msg) => write!(f, "Erro de notificação: {}", msg),
+            AppError::Backup(msg) => write!(f, "Erro de backup: {}", msg),
+            AppError::Service(msg) => write!(f, "Erro de serviço: {}", msg),
             AppError::NotImplemented(msg) => write!(f, "Não implementado: {}", msg),
         }
     }
@@ -45,6 +57,12 @@ impl From<rusqlite::Error> for AppError {
 impl From<chrono::ParseError> for AppError {
     fn from(err: chrono::ParseError) -> Self {
         AppError::Input(err.to_string())
+    }
+}
+
+impl From<crate::desktop::notifications::NotificationError> for AppError {
+    fn from(err: crate::desktop::notifications::NotificationError) -> Self {
+        AppError::Notification(err.to_string())
     }
 }
 

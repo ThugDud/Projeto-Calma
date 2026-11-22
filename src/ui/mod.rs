@@ -5,6 +5,8 @@ pub mod hierarchy;
 pub mod layout;
 pub mod modal;
 pub mod overview;
+pub mod recurring;
+pub mod settings;
 pub mod shortcuts;
 pub mod tasks;
 pub mod theme;

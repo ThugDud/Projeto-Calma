@@ -1,6 +1,7 @@
 use crate::app::{App, InputMode, View};
 use crate::errors::AppResult;
-use crate::models::task::TaskPriority;
+use crate::models::task::{TaskPriority, TaskRecurrence};
+use crate::services::portability::ImportMode;
 use chrono::{Datelike, Duration};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use rusqlite::Connection;
@@ -70,12 +71,12 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
                 return Ok(true);
             }
             KeyCode::Tab => {
-                edit.active_field = (edit.active_field + 1) % 4;
+                edit.active_field = (edit.active_field + 1) % 7;
                 return Ok(true);
             }
             KeyCode::BackTab => {
                 edit.active_field = if edit.active_field == 0 {
-                    3
+                    6
                 } else {
                     edit.active_field - 1
                 };
@@ -106,6 +107,57 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
                         _ => {}
                     },
                     2 => match key.code {
+                        KeyCode::Backspace => {
+                            edit.time_str.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            edit.time_str.push(c);
+                        }
+                        _ => {}
+                    },
+                    3 => {
+                        let cycle = matches!(
+                            key.code,
+                            KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Up
+                                | KeyCode::Down
+                                | KeyCode::Char(' ')
+                                | KeyCode::Char('r')
+                                | KeyCode::Char('R')
+                        );
+                        if let KeyCode::Char(digit) = key.code {
+                            edit.recurrence = match digit {
+                                '0' => TaskRecurrence::None,
+                                '1' => TaskRecurrence::Daily,
+                                '2' => TaskRecurrence::Weekly,
+                                _ => edit.recurrence,
+                            };
+                        } else if cycle {
+                            edit.recurrence = match edit.recurrence {
+                                TaskRecurrence::None => TaskRecurrence::Daily,
+                                TaskRecurrence::Daily => TaskRecurrence::Weekly,
+                                TaskRecurrence::Weekly => TaskRecurrence::None,
+                            };
+                        }
+
+                        if edit.recurrence == TaskRecurrence::Weekly && edit.recurrence_days == 0 {
+                            edit.recurrence_days = crate::models::task::WEEKDAYS_MON_TO_FRI;
+                        }
+                    }
+                    4 => {
+                        if let KeyCode::Char(digit) = key.code {
+                            if let Some(index) = digit.to_digit(10).and_then(|d| d.checked_sub(1)) {
+                                if let Some(weekday) =
+                                    crate::models::task::weekday_from_index(index as usize)
+                                {
+                                    let bit = crate::models::task::weekday_bit(weekday);
+                                    edit.recurrence_days ^= bit;
+                                }
+                            }
+                        }
+                    }
+                    5 => match key.code {
                         KeyCode::Char('1') => edit.priority = TaskPriority::Baixa,
                         KeyCode::Char('2') => edit.priority = TaskPriority::Normal,
                         KeyCode::Char('3') => edit.priority = TaskPriority::Alta,
@@ -128,7 +180,7 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
                         }
                         _ => {}
                     },
-                    3 => match key.code {
+                    6 => match key.code {
                         KeyCode::Char('p')
                         | KeyCode::Char('P')
                         | KeyCode::Char(' ')
@@ -295,15 +347,174 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
         return Ok(true);
     }
 
-    // Se a ajuda estiver aberta, apenas Esc, q ou ? fecha
+    // 7. MODO: Exportação de dados
+    if let InputMode::ExportData { .. } = app.input_mode {
+        match key.code {
+            KeyCode::Enter => {
+                app.export_data(conn);
+            }
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                if let InputMode::ExportData { ref mut buffer } = app.input_mode {
+                    buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let InputMode::ExportData { ref mut buffer } = app.input_mode {
+                    buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // 8. MODO: Caminho do arquivo de importação
+    if let InputMode::ImportData { .. } = app.input_mode {
+        match key.code {
+            KeyCode::Enter => {
+                app.start_import_choice();
+            }
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                if let InputMode::ImportData { ref mut buffer } = app.input_mode {
+                    buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let InputMode::ImportData { ref mut buffer } = app.input_mode {
+                    buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // 9. MODO: Escolha entre adicionar e sobrescrever
+    if let InputMode::ImportChoice { .. } = app.input_mode {
+        match key.code {
+            KeyCode::Enter => {
+                app.import_data(conn);
+            }
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::Char(' ')
+            | KeyCode::Char('j')
+            | KeyCode::Char('k') => {
+                if let InputMode::ImportChoice {
+                    ref mut selected, ..
+                } = app.input_mode
+                {
+                    *selected = match selected {
+                        ImportMode::Add => ImportMode::Overwrite,
+                        ImportMode::Overwrite => ImportMode::Add,
+                    };
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if let InputMode::ImportChoice {
+                    ref mut selected, ..
+                } = app.input_mode
+                {
+                    *selected = ImportMode::Add;
+                }
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                if let InputMode::ImportChoice {
+                    ref mut selected, ..
+                } = app.input_mode
+                {
+                    *selected = ImportMode::Overwrite;
+                }
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // Se a ajuda estiver aberta, role o conteúdo ou feche com Esc/q/?.
     if app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
                 app.show_help = false;
                 return Ok(true);
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+                return Ok(true);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+                return Ok(true);
+            }
+            KeyCode::PageUp => {
+                app.help_scroll = app.help_scroll.saturating_sub(10);
+                return Ok(true);
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.help_scroll = app.help_scroll.saturating_add(10);
+                return Ok(true);
+            }
+            KeyCode::Home => {
+                app.help_scroll = 0;
+                return Ok(true);
+            }
+            KeyCode::End => {
+                app.help_scroll = u16::MAX;
+                return Ok(true);
+            }
             _ => return Ok(true),
         }
+    }
+
+    // Menu de seções aberto: navegação, atalho numérico, confirmação e fechamento.
+    if app.show_view_menu {
+        let last = View::MENU.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => {
+                app.show_view_menu = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.view_menu_idx = app.view_menu_idx.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.view_menu_idx = (app.view_menu_idx + 1).min(last);
+            }
+            KeyCode::Home => {
+                app.view_menu_idx = 0;
+            }
+            KeyCode::End => {
+                app.view_menu_idx = last;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let view = View::MENU[app.view_menu_idx.min(last)].0;
+                app.switch_view(view);
+                app.show_view_menu = false;
+            }
+            KeyCode::Char(c) => {
+                if let Some((view, _, _)) = View::MENU.iter().find(|(_, _, key)| *key == c) {
+                    let view = *view;
+                    app.switch_view(view);
+                    app.show_view_menu = false;
+                }
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // 7. Tela de configurações: navegação, alternância e edição numérica.
+    if app.current_view == View::Configuracoes {
+        return handle_settings_key(app, key);
     }
 
     // Atalhos globais no MODO NORMAL
@@ -313,31 +524,55 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
             return Ok(false);
         }
         KeyCode::Char('?') | KeyCode::Char('/') => {
+            app.help_scroll = 0;
             app.show_help = true;
+            return Ok(true);
+        }
+        KeyCode::Tab => {
+            app.view_menu_idx = app.current_view.menu_position();
+            app.show_view_menu = true;
             return Ok(true);
         }
         KeyCode::Esc => {
             app.show_help = false;
+            app.show_view_menu = false;
+            app.notice = None;
+            return Ok(true);
+        }
+        KeyCode::Char('x') | KeyCode::Char('X') => {
+            app.start_export();
+            return Ok(true);
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            app.start_import();
             return Ok(true);
         }
         KeyCode::Char('1') => {
-            app.current_view = View::Calendario;
+            app.switch_view(View::Calendario);
             return Ok(true);
         }
         KeyCode::Char('2') => {
-            app.current_view = View::Tarefas;
+            app.switch_view(View::Tarefas);
             return Ok(true);
         }
         KeyCode::Char('3') => {
-            app.current_view = View::Hierarquia;
+            app.switch_view(View::Hierarquia);
             return Ok(true);
         }
         KeyCode::Char('4') => {
-            app.current_view = View::VisaoGeral;
+            app.switch_view(View::VisaoGeral);
             return Ok(true);
         }
         KeyCode::Char('5') => {
-            app.current_view = View::Eventos;
+            app.switch_view(View::Eventos);
+            return Ok(true);
+        }
+        KeyCode::Char('6') => {
+            app.switch_view(View::Configuracoes);
+            return Ok(true);
+        }
+        KeyCode::Char('7') => {
+            app.switch_view(View::Recorrentes);
             return Ok(true);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -383,7 +618,83 @@ fn handle_key(app: &mut App, conn: &Connection, key: KeyEvent) -> AppResult<bool
         View::Hierarquia => handle_hierarchy_key(app, key),
         View::VisaoGeral => handle_overview_key(app, key),
         View::Eventos => handle_eventos_key(app, key),
+        View::Recorrentes => handle_recurring_key(app, key),
+        View::Configuracoes => handle_settings_key(app, key),
     }
+}
+
+fn handle_settings_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
+    // Edição numérica tem prioridade sobre os atalhos da tela.
+    if app.settings.editing_value.is_some() {
+        match key.code {
+            KeyCode::Enter => app.settings_commit_edit(),
+            KeyCode::Esc => app.settings_cancel_edit(),
+            KeyCode::Backspace => app.settings_pop_char(),
+            KeyCode::Char(c) => app.settings_push_char(c),
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Char('Q') => {
+            app.quit();
+            return Ok(false);
+        }
+        KeyCode::Tab => {
+            app.view_menu_idx = app.current_view.menu_position();
+            app.show_view_menu = true;
+        }
+        KeyCode::Char('?') | KeyCode::Char('/') => {
+            app.help_scroll = 0;
+            app.show_help = true;
+        }
+        KeyCode::Esc => {
+            app.close_settings();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_select_previous();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_select_next();
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.settings_activate_selected();
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            app.refresh_desktop_diagnostics();
+        }
+        KeyCode::Char('x') | KeyCode::Char('X') => {
+            app.start_export();
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            app.start_import();
+        }
+        KeyCode::Char('1') => {
+            app.switch_view(View::Calendario);
+        }
+        KeyCode::Char('2') => {
+            app.switch_view(View::Tarefas);
+        }
+        KeyCode::Char('3') => {
+            app.switch_view(View::Hierarquia);
+        }
+        KeyCode::Char('4') => {
+            app.switch_view(View::VisaoGeral);
+        }
+        KeyCode::Char('5') => {
+            app.switch_view(View::Eventos);
+        }
+        KeyCode::Char('6') => {
+            app.switch_view(View::Configuracoes);
+        }
+        KeyCode::Char('7') => {
+            app.switch_view(View::Recorrentes);
+        }
+        _ => {}
+    }
+
+    Ok(true)
 }
 
 fn handle_tasks_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
@@ -500,6 +811,25 @@ fn handle_eventos_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
         }
         _ => Ok(true),
     }
+}
+
+fn handle_recurring_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {
+    match key.code {
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
+            app.recurring_previous_day();
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
+            app.recurring_next_day();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.select_previous();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.select_next();
+        }
+        _ => {}
+    }
+    Ok(true)
 }
 
 fn handle_calendar_key(app: &mut App, key: KeyEvent) -> AppResult<bool> {

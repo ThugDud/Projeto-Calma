@@ -124,4 +124,6 @@ fn print_help() {
     println!("Dados:        $XDG_DATA_HOME/calma/calma.db (padrão: ~/.local/share/calma/calma.db)");
     println!("Serviço:      systemd de usuário (~/.config/systemd/user/calma-daemon.service)");
     println!("              Habilitado automaticamente em Configurações > Iniciar com o sistema.");
+    println!("Bandeja:      KDE StatusNotifierItem enquanto o daemon está ativo.");
+    println!("              Clique no ícone para abrir a TUI no terminal padrão.");
 }

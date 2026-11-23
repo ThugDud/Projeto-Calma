@@ -19,6 +19,8 @@ pub enum AppError {
     Backup(String),
     /// Erro ao instalar, habilitar ou desabilitar serviços do sistema.
     Service(String),
+    /// Erro ao criar, atualizar ou controlar o ícone de bandeja.
+    Tray(String),
     /// Operação não implementada ainda.
     NotImplemented(String),
 }
@@ -35,6 +37,7 @@ impl std::fmt::Display for AppError {
             AppError::Notification(msg) => write!(f, "Erro de notificação: {}", msg),
             AppError::Backup(msg) => write!(f, "Erro de backup: {}", msg),
             AppError::Service(msg) => write!(f, "Erro de serviço: {}", msg),
+            AppError::Tray(msg) => write!(f, "Erro de bandeja: {}", msg),
             AppError::NotImplemented(msg) => write!(f, "Não implementado: {}", msg),
         }
     }

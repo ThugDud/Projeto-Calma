@@ -6,8 +6,11 @@ use crate::desktop::detection::DesktopSession;
 use crate::desktop::notifications::{
     BackendPreference, DesktopNotifierFactory, ServiceAvailability, select_backend,
 };
+use crate::desktop::tray::{self, TrayHandle, TraySummary};
 use crate::errors::AppResult;
 use rusqlite::Connection;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Serviço principal do daemon.
@@ -24,6 +27,10 @@ pub struct DaemonService {
     notifier: Box<dyn Notifier>,
     running: bool,
     last_report: Option<CheckReport>,
+    /// Ícone de bandeja, quando o ambiente oferece um backend compatível.
+    tray: Option<Box<dyn TrayHandle>>,
+    /// Pedido de encerramento originado pelo menu da bandeja.
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl DaemonService {
@@ -58,6 +65,8 @@ impl DaemonService {
             notifier,
             running: false,
             last_report: None,
+            tray: None,
+            stop_requested: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -110,13 +119,57 @@ impl DaemonService {
 
         self.scheduler.mark_checked(Instant::now());
         self.last_report = Some(report.clone());
+        self.update_tray(&report);
         Ok(report)
+    }
+
+    /// Inicia o ícone de bandeja, se a configuração permitir.
+    ///
+    /// Uma falha na bandeja nunca impede o daemon de verificar prazos e
+    /// entregar notificações. O motivo é registrado e o serviço continua.
+    pub fn start_tray(&mut self) {
+        if self.tray.is_some() {
+            return;
+        }
+
+        match tray::start_for_daemon(
+            &self.config,
+            TraySummary::default(),
+            self.stop_requested.clone(),
+        ) {
+            Ok(Some(handle)) => self.tray = Some(handle),
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("Calma daemon: ícone de bandeja indisponível: {}", err);
+            }
+        }
+    }
+
+    /// Reflete o resultado da última verificação no ícone de bandeja.
+    fn update_tray(&mut self, report: &CheckReport) {
+        let closed = if let Some(tray) = self.tray.as_mut() {
+            let summary = TraySummary::from_counts(
+                report.tasks_today.len(),
+                report.overdue_tasks.len(),
+                report.events_today.len(),
+            );
+            tray.update(summary);
+            tray.is_closed()
+        } else {
+            false
+        };
+
+        if closed {
+            self.tray = None;
+        }
     }
 
     /// Inicia o ciclo de vida do daemon e bloqueia até um pedido de parada.
     ///
     /// Se o monitoramento estiver desabilitado, o serviço encerra de forma
-    /// limpa imediatamente. A TUI nunca inicia este loop automaticamente.
+    /// limpa imediatamente. Quando há um backend compatível, o ícone de
+    /// bandeja é registrado antes do loop e atualizado a cada verificação.
+    /// A TUI nunca inicia este loop automaticamente.
     pub fn run(&mut self) -> AppResult<()> {
         if !self.config.general.background_monitoring {
             self.shutdown();
@@ -124,14 +177,25 @@ impl DaemonService {
         }
 
         self.running = true;
+        self.start_tray();
+
+        let result = self.run_loop();
+        self.shutdown();
+        result
+    }
+
+    fn run_loop(&mut self) -> AppResult<()> {
         while self.running {
+            if self.stop_requested.load(Ordering::Relaxed) {
+                break;
+            }
+
             if self.scheduler.should_check(Instant::now()) {
                 self.tick()?;
             }
             std::thread::sleep(self.poll_delay());
         }
 
-        self.shutdown();
         Ok(())
     }
 
@@ -143,6 +207,9 @@ impl DaemonService {
     /// Encerra o serviço e libera o estado de execução.
     pub fn shutdown(&mut self) {
         self.running = false;
+        if let Some(mut tray) = self.tray.take() {
+            tray.shutdown();
+        }
     }
 
     /// Intervalo de espera entre iterações do loop.
@@ -211,6 +278,25 @@ mod tests {
 
         assert!(report.is_empty());
         assert!(!service.is_running());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tray_is_not_started_when_disabled() {
+        let path = temp_db_path("tray-disabled");
+        let config = Config {
+            database_path: path.clone(),
+            tray: crate::config::TraySettings {
+                enabled: false,
+                ..crate::config::TraySettings::default()
+            },
+            ..Config::default()
+        };
+
+        let mut service = DaemonService::new(config).expect("daemon deve inicializar");
+        service.start_tray();
+        assert!(service.tray.is_none());
 
         let _ = std::fs::remove_file(path);
     }

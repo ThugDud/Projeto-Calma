@@ -23,6 +23,8 @@ pub const MAX_NOTIFICATION_ADVANCE_MINUTES: u32 = 7 * 24 * 60;
 pub const DEFAULT_NOTIFICATION_ADVANCE_MINUTES: u32 = 60;
 /// Backend padrão de notificações desktop: seleção automática.
 pub const DEFAULT_DESKTOP_NOTIFICATION_BACKEND: &str = "auto";
+/// Backend padrão do ícone de bandeja: seleção automática.
+pub const DEFAULT_TRAY_BACKEND: &str = "auto";
 
 /// Preferências gerais do Calma.
 ///
@@ -109,6 +111,38 @@ impl Default for NotificationSettings {
     }
 }
 
+/// Preferências do ícone de bandeja do sistema.
+///
+/// Nesta versão o único backend implementado é o StatusNotifierItem usado
+/// pelo KDE Plasma. A seleção é abstraída para permitir novos backends no
+/// futuro sem alterar a TUI nem o daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraySettings {
+    /// Exibe o ícone na bandeja enquanto o daemon estiver em execução.
+    pub enabled: bool,
+    /// `auto`, `kde` ou `off`.
+    ///
+    /// `auto` usa o backend compatível com o ambiente detectado. `off`
+    /// desativa o ícone sem remover a preferência.
+    pub backend: String,
+    /// Terminal usado para abrir a TUI ao clicar no ícone.
+    ///
+    /// Vazio significa detectar automaticamente o terminal padrão do
+    /// sistema (no KDE, a preferência de terminal do próprio Plasma).
+    pub terminal: String,
+}
+
+impl Default for TraySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: DEFAULT_TRAY_BACKEND.to_string(),
+            terminal: String::new(),
+        }
+    }
+}
+
 /// Preferências visuais da interface.
 ///
 /// O tema ainda não altera a renderização atual; o campo já existe para
@@ -149,6 +183,8 @@ pub struct Config {
     pub general: GeneralSettings,
     /// Preferências de notificações.
     pub notifications: NotificationSettings,
+    /// Preferências do ícone de bandeja.
+    pub tray: TraySettings,
     /// Preferências visuais.
     pub interface: InterfaceSettings,
 }
@@ -167,6 +203,7 @@ impl Default for Config {
             load_warning: None,
             general: GeneralSettings::default(),
             notifications: NotificationSettings::default(),
+            tray: TraySettings::default(),
             interface: InterfaceSettings::default(),
         }
     }
@@ -431,6 +468,9 @@ mod tests {
             config.notifications.desktop.backend,
             DEFAULT_DESKTOP_NOTIFICATION_BACKEND
         );
+        assert!(config.tray.enabled);
+        assert_eq!(config.tray.backend, DEFAULT_TRAY_BACKEND);
+        assert!(config.tray.terminal.is_empty());
         assert_eq!(config.interface.theme, "dark");
     }
 
@@ -469,6 +509,11 @@ mod tests {
                 advance_minutes: 45,
                 ..NotificationSettings::default()
             },
+            tray: TraySettings {
+                enabled: false,
+                backend: "kde".to_string(),
+                terminal: "konsole".to_string(),
+            },
             interface: InterfaceSettings {
                 theme: "claro".to_string(),
             },
@@ -480,6 +525,7 @@ mod tests {
 
         assert_eq!(loaded.general, config.general);
         assert_eq!(loaded.notifications, config.notifications);
+        assert_eq!(loaded.tray, config.tray);
         assert_eq!(loaded.interface, config.interface);
         assert!(loaded.load_warning.is_none());
 

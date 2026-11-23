@@ -112,6 +112,7 @@ Ajudar você a organizar a vida acadêmica, pessoal e financeira sem exigir plan
    - Entrega nativa pelo barramento D-Bus da sessão via `org.freedesktop.Notifications`, com suporte verificado em KDE Plasma.
    - Avisos únicos por tarefa/evento no dia e um aviso adicional dentro da antecedência configurada para eventos com horário.
    - Inicialização automática opcional via serviço systemd de usuário criado e habilitado pela própria TUI, sem edição manual de arquivos.
+   - Ícone na bandeja do KDE com três estados (good/attention/late vibes) e clique para abrir a TUI no terminal padrão.
    - Execução manual em primeiro plano com `calma daemon`; IPC continua fora do escopo.
 
 ---
@@ -158,6 +159,7 @@ No formulário de edição de tarefa, `Tab`/`Shift+Tab` alternam entre Título, 
 - Biblioteca SQLite3 (`libsqlite3-dev` no Debian/Ubuntu, `sqlite` no Arch Linux).
 - Para notificações desktop: sessão gráfica com barramento D-Bus de sessão e um serviço `org.freedesktop.Notifications` (KDE Plasma é o ambiente testado).
 - Para inicialização automática: systemd de usuário (`systemctl --user`). Outros gerenciadores ainda não são suportados.
+- Para o ícone na bandeja: KDE Plasma com `org.kde.StatusNotifierWatcher` (o ícone aparece na área de serviços em segundo plano) e um terminal instalado. Nesta versão apenas o backend KDE está implementado.
 
 ---
 
@@ -357,9 +359,14 @@ advance_minutes = 60
 
 [notifications.desktop]
 backend = "auto"
+
+[tray]
+enabled = true
+backend = "auto"
+terminal = ""
 ```
 
-Configurações antigas sem a seção `[notifications.desktop]` continuam válidas e recebem `backend = "auto"`. O resultado da detecção é sempre de runtime e nunca é gravado no TOML.
+Configurações antigas sem a seção `[notifications.desktop]` continuam válidas e recebem `backend = "auto"`. Configurações sem `[tray]` recebem `enabled = true`, `backend = "auto"` e `terminal = ""`. O resultado da detecção é sempre de runtime e nunca é gravado no TOML.
 
 ### Comportamento dos avisos
 
@@ -386,6 +393,43 @@ A opção **Iniciar com o sistema**, em **Configurações > Geral**, cuida de to
 - Se a operação falhar, a preferência é revertida e a tela de configurações mostra o motivo.
 
 O backend é abstraído por `ServiceBackend`/`AutostartManager` em `src/services/autostart.rs`. A versão atual implementa apenas o systemd de usuário; outros gerenciadores podem ser adicionados implementando o trait e registrando o novo backend na ordem de preferência, sem alterar a TUI.
+
+### Ícone na bandeja do sistema (KDE)
+
+Quando o daemon está em execução e há um ambiente compatível, o Calma registra um **StatusNotifierItem** na bandeja do KDE (a área de serviços em segundo plano, no canto inferior direito). O ícone reflete o estado efetivo das tarefas:
+
+| Ícone | Estado | Critério |
+|---|---|---|
+| good vibes | Tudo em dia | Nenhuma tarefa atrasada ou pendente para hoje |
+| attention vibes | Tarefas para hoje | Existe tarefa não concluída que ocorre hoje |
+| late vibes | Tarefas atrasadas | Existe tarefa não concluída com prazo anterior a hoje |
+
+As regras são as mesmas da TUI e do agendador: tarefas recorrentes contam apenas quando ocorrem na data e a conclusão é verificada por ocorrência. `late vibes` tem prioridade sobre `attention vibes`. O tooltip mostra as contagens e o menu da bandeja oferece **Abrir Calma** e **Sair do daemon**.
+
+Um clique no ícone (ou em **Abrir Calma**) abre a TUI em um processo separado, usando o terminal padrão detectado nesta ordem:
+
+1. `terminal` da seção `[tray]` da configuração, quando preenchido;
+2. variável de ambiente `TERMINAL`;
+3. preferência de terminal do KDE Plasma (`TerminalApplication` em `kdeglobals`, lida com `kreadconfig6`/`kreadconfig5`);
+4. emuladores conhecidos do ambiente (no KDE, `konsole`);
+5. lista genérica de emuladores encontrados no `PATH`.
+
+Configuração:
+
+```toml
+[tray]
+enabled = true       # mostra o ícone enquanto o daemon estiver ativo
+backend = "auto"     # auto | kde | off
+terminal = ""        # vazio = detectar automaticamente
+```
+
+- `auto` ativa a bandeja apenas quando a sessão é KDE Plasma.
+- `kde` força o backend StatusNotifierItem.
+- `off` (ou `none`/`noop`) desativa o ícone sem remover as demais preferências.
+- O daemon continua funcionando normalmente se a bandeja não estiver disponível; o motivo é registrado em `stderr`.
+- O ícone é atualizado a cada verificação periódica do daemon. Sem o daemon em execução, não há ícone.
+
+A arquitetura é abstraída por `TrayBackend`/`TrayHandle`/`TrayManager` em `src/desktop/tray/`. A versão atual implementa apenas o backend KDE StatusNotifierItem; novos ambientes podem ser adicionados implementando o trait e registrando o backend, sem alterar o daemon ou a TUI. A abertura da TUI fica em `src/desktop/terminal.rs` e também é reutilizável por futuros backends.
 
 ### Tela de Configurações
 
@@ -418,6 +462,8 @@ Esse teste envia uma notificação real. A suíte padrão (`cargo test`) não de
 - Não há backend para Windows ou macOS.
 - A inicialização automática suporta apenas o systemd de usuário nesta versão; IPC e rede continuam fora do escopo.
 - Outros gerenciadores de serviço podem ser adicionados pelo trait `ServiceBackend`, mas ainda não estão implementados.
+- O ícone de bandeja suporta apenas KDE Plasma (StatusNotifierItem) nesta versão. Outros desktops podem ser adicionados pelo trait `TrayBackend`.
+- O clique na bandeja abre uma nova instância da TUI; não há IPC para focar uma janela já aberta.
 - A deduplicação é apenas em memória: reiniciar o daemon pode repetir um aviso já enviado no mesmo dia.
 - O aviso de antecedência é emitido na primeira verificação que encontrar o evento dentro da janela configurada; com `poll_interval_secs = 1800`, por exemplo, ele pode chegar um pouco menos de 60 minutos antes.
 - A seleção do backend é feita uma vez na inicialização do daemon; se o serviço de notificações só ficar disponível depois, reinicie o daemon.
@@ -552,6 +598,7 @@ Help you organize your academic, personal, and financial life without requiring 
    - Native delivery through the session D-Bus using `org.freedesktop.Notifications`, with verified support on KDE Plasma.
    - One notification per task/event on its day, plus one additional notification within the configured lead time for timed events.
    - Optional automatic startup through a systemd user service created and enabled by the TUI itself, without manually editing service files.
+   - KDE system tray icon with three states (good/attention/late vibes) and click-to-open the TUI in the default terminal.
    - Manual foreground execution with `calma daemon`; IPC remains out of scope.
 
 ---
@@ -598,6 +645,7 @@ In the task edit form, `Tab`/`Shift+Tab` cycle through Title, Due date, Time, Re
 - SQLite3 library (`libsqlite3-dev` on Debian/Ubuntu, `sqlite` on Arch Linux).
 - For desktop notifications: a graphical session with a session D-Bus and an `org.freedesktop.Notifications` service (KDE Plasma is the tested environment).
 - For automatic startup: systemd user service (`systemctl --user`). Other service managers are not supported yet.
+- For the system tray icon: KDE Plasma with `org.kde.StatusNotifierWatcher` (the icon appears in the background services area) and an installed terminal. Only the KDE backend is implemented in this version.
 
 ---
 
@@ -748,9 +796,14 @@ advance_minutes = 60
 
 [notifications.desktop]
 backend = "auto"
+
+[tray]
+enabled = true
+backend = "auto"
+terminal = ""
 ```
 
-Older configurations without `[notifications.desktop]` remain valid and receive `backend = "auto"`. Detection results are always runtime-only and are never written to TOML.
+Older configurations without `[notifications.desktop]` remain valid and receive `backend = "auto"`. Configurations without `[tray]` receive `enabled = true`, `backend = "auto"`, and `terminal = ""`. Detection results are always runtime-only and are never written to TOML.
 
 ### Notification behavior
 
@@ -777,6 +830,43 @@ The **Start with the system** option in **Settings > General** handles the entir
 - If the operation fails, the preference is rolled back and the settings screen shows the reason.
 
 The backend is abstracted by `ServiceBackend`/`AutostartManager` in `src/services/autostart.rs`. The current version implements only the systemd user service; additional managers can be added by implementing the trait and registering the new backend in preference order without changing the TUI.
+
+### System tray icon (KDE)
+
+When the daemon is running in a compatible environment, Calma registers a **StatusNotifierItem** in the KDE tray (the background services area in the bottom-right corner). The icon reflects the effective task state:
+
+| Icon | State | Rule |
+|---|---|---|
+| good vibes | All caught up | No overdue tasks and no pending tasks for today |
+| attention vibes | Tasks for today | At least one unfinished task occurs today |
+| late vibes | Overdue tasks | At least one unfinished task has a due date before today |
+
+The rules are the same as the TUI and scheduler: recurring tasks count only when they occur on the date, and completion is checked per occurrence. `late vibes` takes priority over `attention vibes`. The tooltip shows the counts, and the tray menu offers **Abrir Calma** (Open Calma) and **Sair do daemon** (Quit daemon).
+
+Clicking the icon (or **Abrir Calma**) opens the TUI in a separate process using the default terminal detected in this order:
+
+1. `terminal` from the `[tray]` configuration section, when set;
+2. the `TERMINAL` environment variable;
+3. the KDE Plasma terminal preference (`TerminalApplication` in `kdeglobals`, read through `kreadconfig6`/`kreadconfig5`);
+4. known terminals for the detected environment (on KDE, `konsole`);
+5. a generic list of terminal emulators found in `PATH`.
+
+Configuration:
+
+```toml
+[tray]
+enabled = true       # show the icon while the daemon is running
+backend = "auto"     # auto | kde | off
+terminal = ""        # empty = detect automatically
+```
+
+- `auto` enables the tray only when the session is KDE Plasma.
+- `kde` forces the StatusNotifierItem backend.
+- `off` (or `none`/`noop`) disables the icon without removing other preferences.
+- The daemon keeps running normally when the tray is unavailable; the reason is written to `stderr`.
+- The icon is refreshed on every periodic daemon check. Without the daemon running, there is no icon.
+
+The architecture is abstracted by `TrayBackend`/`TrayHandle`/`TrayManager` in `src/desktop/tray/`. The current version implements only the KDE StatusNotifierItem backend; new environments can be added by implementing the trait and registering the backend without changing the daemon or the TUI. TUI launching lives in `src/desktop/terminal.rs` and can be reused by future backends.
 
 ### Settings screen
 
@@ -809,6 +899,8 @@ This test sends a real notification. The default suite (`cargo test`) does not d
 - There is no Windows or macOS backend.
 - Automatic startup supports only the systemd user service in this version; IPC and networking remain out of scope.
 - Other service managers can be added through the `ServiceBackend` trait but are not implemented yet.
+- The tray icon supports only KDE Plasma (StatusNotifierItem) in this version. Other desktops can be added through the `TrayBackend` trait.
+- Clicking the tray opens a new TUI instance; there is no IPC to focus an already open window.
 - Deduplication is memory-only: restarting the daemon may repeat a notification already sent that day.
 - The lead-time notification is emitted on the first check that finds the event inside the configured window; with `poll_interval_secs = 1800`, for example, it may arrive slightly less than 60 minutes before the event.
 - The backend is selected once when the daemon starts; if the notification service only becomes available later, restart the daemon.
